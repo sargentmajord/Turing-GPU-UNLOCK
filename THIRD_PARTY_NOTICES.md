@@ -41,6 +41,23 @@ is not done, and why.
   Linux kernel module, by providing EFI-backed implementations of the same function/struct surface. Confirmed sufficient
   for turing-unlock's own Linux header usage without modification - see PORTING-PLAN.md.
 
+## The app layer and build scaffolding - sargentmajord/Windows-GPU-UNLOCK, GPL-2.0-only
+
+- Source: [sargentmajord/Windows-GPU-UNLOCK](https://github.com/sargentmajord/Windows-GPU-UNLOCK)
+  `internal-boot/unlock/{app.c,app.h,app_io.c,app_io.h,checks.c,checks.h,ownership.c,ownership.h,port.c,port.h,
+  runtime.c,runtime.h,format.c,format.h,sha256.c,sha256.h,machine-profile.h,build.ps1,verify_pe.py}`, adapted into the
+  same-named files here (each file's own header says so and points back to this notice).
+- `verify_pe.py` is copied unchanged (generic PE32+/EFI-application structure checks, nothing Ampere-specific in it).
+  `build.ps1` is adapted and deliberately scoped down: no `-AutomaticBoot`/`-InternalBoot`/`-HeadlessResearch`/
+  `-StockProfile`, because nothing analogous has been built or validated for Turing yet - see PORTING-PLAN.md.
+  `port.h`'s card-acceptance table (`GuTargets`) is this project's own addition, not from the Ampere original - see
+  the Turing-core section above. Everything else (`app.c`'s entry point and its `BarCheck`/`PromCheck`/`ColdCheck`/
+  `DisplayCheck` stubs, `app_io.c`'s console/asset-loading layer, `checks.c`'s PCI capability-chain logic,
+  `ownership.c`'s driver-ownership tracking, `runtime.c`, `format.c`, `sha256.c`, `machine-profile.h`'s profile
+  selector) is adapted the same way the compat shim is: the structure and most of the logic carried over, with the
+  machine-specific checks left as explicit, clearly-marked stubs rather than guessed at - see PORTING-PLAN.md for
+  exactly what is and is not done.
+
 ## EDK2 headers - BSD-2-Clause-Patent
 
 - Source: [TianoCore EDK2](https://github.com/tianocore/edk2), copied from the pinned commit already used in

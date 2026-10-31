@@ -107,6 +107,12 @@ adaptation work is the same shape and (going by `gfw_eval.c`) a similar size to 
    parser (`vbios.c`) - nothing in any of them is platform-specific, only TU102-specific, and nlzy already wrote
    them correctly for TU102. These three need **zero** porting work beyond compiling them, which item 3 below
    covers.
+
+   **Correction, 2026-10-31 (third pass): `boot.c` belongs on this same no-adaptation list, checked the same
+   way.** It only includes `<linux/firmware.h>` (for `struct firmware`, already in `compat/`) and
+   `<linux/string.h>`; zero `readl`/`writel`/`dma_*`/`pci_*`/`request_firmware` calls. It's `unlock.c`'s boot-
+   descriptor parser (`turing_unlock_boot_desc_v4`, called from `unlock.c`'s `init_hw`-equivalent path) - pure
+   byte parsing, same shape as `layout.c`/`prep.c`/`vbios.c`, not platform-specific at all.
 2. ~~Swap in TU102-specific constants~~ - **done already, nothing to swap.** Checked directly: every constant in
    `docs/Difference between Ampere and Turing.md`'s TU102 column is already present and correct in the pristine
    vendor code - `generate_v67.py` (host-side, not firmware) has `PAYLOAD_SIZE=0xFA00`, `FILL_DWORD=0x4A7`, the
@@ -120,6 +126,23 @@ adaptation work is the same shape and (going by `gfw_eval.c`) a similar size to 
 3. **Get it compiling** against this project's host-side test harness, the same way
    sargentmajord/Windows-GPU-UNLOCK's `tests/test_transaction.c` proves the Ampere vendor code is at least
    internally consistent without real hardware.
+
+   **`internal-boot/unlock/build.ps1` and `verify_pe.py` - written, not run.** `build.ps1` is the actual
+   firmware-producing build (clang + lld-link, `-target x86_64-pc-windows-msvc -ffreestanding ...`, EFI-
+   application subsystem), adapted from the Ampere project's own `build.ps1`, deliberately scoped down to
+   the two modes `app.c`/`port.h` actually support (default preflight-only, and `-ExperimentalUnlock`) -
+   no `-AutomaticBoot`/`-InternalBoot`/`-HeadlessResearch`/`-StockProfile`, since none of those Ampere
+   research refinements have any Turing equivalent yet. The source list (`app`, `app_io`, `ownership`,
+   `format`, `runtime`, `sha256`, `checks`, `port`, `compat`, and the six vendor files above, `main.c`
+   excluded) was checked file-by-file against what each one actually `#include`s, not copied blindly.
+   `verify_pe.py` is copied unchanged - generic PE32+/EFI-application structure checks, nothing Ampere- or
+   Turing-specific in it. **Neither has actually been executed anywhere** - this environment has no
+   clang/lld-link toolchain installed to invoke them with (checked directly: not on PATH, not under
+   `C:\Program Files\LLVM`, not in any winget package/link directory). This is scaffolding, reviewed but
+   unverified, not a build that has produced an .EFI. Separately and by design, even with a toolchain,
+   compiling `app.c`/`checks.c` against `profiles/TEMPLATE/profile.h` (the only profile that exists) would
+   fail on that file's own `#error` - a real `profiles/<name>/profile.h` from an actual capture is still a
+   prerequisite, per "The two-stage architecture" above, not something this step can shortcut.
 
    **`tests/test_layout.c` - done.** `layout.c`'s `turing_unlock_layout()` is pure arithmetic (no `readl`/`writel`,
    no DMA, no PCI - see item 1's correction above), so it compiles and runs standalone, no mocks needed. Checked
