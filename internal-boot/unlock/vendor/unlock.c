@@ -183,10 +183,10 @@ static int flcn_reset(struct tu_work *w, u32 base)
 		return GU_DIAG(-ENODEV);
 	wr(w, base + 0x3c0, engine | 1);
 	for (i = 0; i < 10; i++)
-		readl(w->bar + base + 0x3c0);
+		rd(w, base + 0x3c0); /* posted-write flush, value intentionally discarded - through rd() like every other read in this file, not raw readl() */
 	wr(w, base + 0x3c0, engine & ~1u);
 	for (i = 0; i < 10; i++)
-		readl(w->bar + base + 0x3c0);
+		rd(w, base + 0x3c0);
 	ret = poll(w, base + 0x10c, 0x6, 0, 1000000, true);
 	if (ret)
 		return GU_DIAG(ret);

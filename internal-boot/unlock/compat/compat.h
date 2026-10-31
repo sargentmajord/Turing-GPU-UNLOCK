@@ -63,7 +63,9 @@ struct device {u64 *dma_mask;u64 coherent_dma_mask;struct list_head devres_head;
 struct pci_dev {struct device dev;int current_state,pm_cap,refs;unsigned int dev_flags;};
 struct firmware {size_t size;const u8 *data;};
 typedef struct {const char *name;struct firmware firmware;} GU_ASSET;
-extern GU_ASSET GuAssets[5];
+/* 6, not Ampere's 5: Turing's unlock.c requests one more firmware file than Ampere's
+ * does (BOOTER, V67, GSP, BOOT, BOOT_DESC, and SEC2_BL - the extra one). */
+extern GU_ASSET GuAssets[6];
 void *memcpy(void *,const void *,size_t);
 void *memset(void *,int,size_t);
 int memcmp(const void *,const void *,size_t);
