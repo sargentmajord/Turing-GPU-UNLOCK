@@ -92,19 +92,31 @@ adaptation work is the same shape and (going by `gfw_eval.c`) a similar size to 
 
 ## What's genuinely still ahead
 
-1. **Apply the UEFI adaptation to each vendor file**, following the exact pattern Ampere's `unlock_610.c` already
-   shows (`#ifdef GU_UEFI_PORT` around target selection, BAR mapping and the one or two execution/cleanup hooks).
-   `gfw_eval.c` is the simplest (near 1:1 with Ampere's already-ported copy) and already done. `unlock.c` is the
-   largest (~1000 lines) and does the real work (FWSEC/FRTS, GSP/SEC2 falcon staging, the SS0/SS1 selector
-   writes); its register-access hardening (`rd`/`wr` fault injection) and its two safety-state hooks are now done
-   too - see "unlock.c adaptation status" below. `layout.c`, `prep.c`, `vbios.c` carry the TU102-specific register
-   layout and need the constants below, not just mechanical adaptation - still ahead.
-2. **Swap in TU102-specific constants**, per `docs/Difference between Ampere and Turing.md` (copied from
-   turing-unlock, reproduced below) and the register offsets already visible directly in `unlock.c`
-   (`GSP_BASE=0x00110000`, `SEC_BASE=0x00840000`, `SEC_FALCON2=0x00841000`, `TU_FEAT_PLM=0x00409650`,
-   `TU_FEAT_SS0=0x00409664`, `TU_FEAT_SS1=0x0040966c`, `TU_FEAT_READOUT=0x00409668`, unlock values
-   `SS0=0x88888888`, `SS1=0x8`). Note `SEC_BASE` is identical to Ampere's `SEC2_BASE` (`0x00840000`) - not every
-   constant differs.
+1. **Apply the UEFI adaptation to each vendor file that actually touches hardware or Linux APIs**, following the
+   exact pattern Ampere's `unlock_610.c` already shows (`#ifdef GU_UEFI_PORT` around target selection, BAR
+   mapping and the one or two execution/cleanup hooks). `gfw_eval.c` is the simplest (near 1:1 with Ampere's
+   already-ported copy) and already done. `unlock.c` is the largest (~1000 lines) and does the real work
+   (FWSEC/FRTS, GSP/SEC2 falcon staging, the SS0/SS1 selector writes); its register-access hardening (`rd`/`wr`
+   fault injection) and its two safety-state hooks are now done too - see "unlock.c adaptation status" below.
+
+   **Correction, 2026-10-31 (second pass):** `layout.c`, `prep.c` and `vbios.c` do *not* need this - checked
+   directly, not assumed. All three are pure freestanding C: no `readl`/`writel`, no `dma_*`, no `pci_*`, no
+   `request_firmware`, no kernel timing/allocation calls of any kind (confirmed by grepping each file for every
+   Linux API `unlock.c` actually needs compat coverage for - zero matches in all three). They're memory-layout
+   arithmetic (`layout.c`), a radix-table/WPR-metadata byte packer (`prep.c`), and an independent VBIOS-ROM byte
+   parser (`vbios.c`) - nothing in any of them is platform-specific, only TU102-specific, and nlzy already wrote
+   them correctly for TU102. These three need **zero** porting work beyond compiling them, which item 3 below
+   covers.
+2. ~~Swap in TU102-specific constants~~ - **done already, nothing to swap.** Checked directly: every constant in
+   `docs/Difference between Ampere and Turing.md`'s TU102 column is already present and correct in the pristine
+   vendor code - `generate_v67.py` (host-side, not firmware) has `PAYLOAD_SIZE=0xFA00`, `FILL_DWORD=0x4A7`, the
+   canary `0x6140`, `put(0xFF4C, 0x10B9)` and the `0x7C43` teardown address, all matching the TU102 column exactly
+   (not GA100's or GA102's). `unlock.c` already has `GSP_BASE=0x00110000`, `SEC_BASE=0x00840000`,
+   `TU_FEAT_PLM/SS0/SS1/READOUT` and the `SS0=0x88888888`/`SS1=0x8` unlock values. The differences table only
+   matters for porting *this* code to a *different* chip (GA100/GA102) - it was never something Turing's own,
+   already-TU102-native code needed substituted in. The earlier wording here implied open work that didn't exist;
+   corrected the same way the "Dell-made" error was corrected above, by checking the primary source again instead
+   of trusting what this document already said.
 3. **Get it compiling** against this project's host-side test harness, the same way
    sargentmajord/Windows-GPU-UNLOCK's `tests/test_transaction.c` + `tests/transaction_shim/` prove the Ampere
    vendor code is at least internally consistent without real hardware. This project doesn't have that harness
