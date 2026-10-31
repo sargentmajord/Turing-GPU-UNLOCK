@@ -14,6 +14,7 @@
 #include "app_io.h"
 #include "compat/compat.h"
 #include "checks.h"
+#include "machine-profile.h"
 #include "ownership.h"
 #include "sha256.h"
 #include "vendor/unlock.h"
@@ -22,8 +23,7 @@
 #include <IndustryStandard/Acpi.h>
 #include <Guid/GlobalVariable.h>
 
-static EFI_GUID PciGuid = EFI_PCI_IO_PROTOCOL_GUID, GopGuid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
-  PathGuid = EFI_DEVICE_PATH_PROTOCOL_GUID, GlobalGuid = EFI_GLOBAL_VARIABLE;
+static EFI_GUID PciGuid = EFI_PCI_IO_PROTOCOL_GUID, GlobalGuid = EFI_GLOBAL_VARIABLE;
 static EFI_SYSTEM_TABLE *Table;
 static UINT32 InitialConfig[64];
 static const char *Stage;

@@ -24,6 +24,9 @@ typedef UINT64 ktime_t;
 #define THIS_MODULE NULL
 #define dev_err(dev, ...) GuLog(__VA_ARGS__)
 #define dev_info(dev, ...) GuLog(__VA_ARGS__)
+/* Same gap as ioremap/udelay above: unlock.c's only caller of this is its retained-
+ * resources warning (turing_unlock_card's cleanup path), never declared anywhere. */
+#define pci_err(pdev, ...) GuLog(__VA_ARGS__)
 #define pr_err(...) GuLog(__VA_ARGS__)
 #define pr_info(...) GuLog(__VA_ARGS__)
 #define PCI_D0 0
@@ -75,6 +78,11 @@ size_t strlen(const char *);
 void *devres_open_group(struct device *,void *,int);
 int devres_release_group(struct device *,void *);
 void usleep_range(unsigned long,unsigned long);
+/* Same gap as ioremap/iounmap/pci_resource_start below: unlock.c calls these two Linux
+ * delay functions directly (udelay in its SEC2 busy-wait, msleep after a PCIe FLR and
+ * while polling for devinit), and neither was declared anywhere in this shim. */
+void udelay(unsigned long);
+void msleep(unsigned long);
 ktime_t ktime_get(void);
 static inline ktime_t ktime_add_us(ktime_t t,unsigned long u) {return t+u;}
 static inline int ktime_compare(ktime_t a,ktime_t b) {return a>b?1:a<b?-1:0;}
@@ -107,8 +115,17 @@ int aperture_remove_conflicting_pci_devices(struct pci_dev *,const char *);
 int pci_enable_device_mem(struct pci_dev *);
 void pci_disable_device(struct pci_dev *);
 resource_size_t pci_resource_len(struct pci_dev *,int);
+resource_size_t pci_resource_start(struct pci_dev *,int);
 void *pci_iomap(struct pci_dev *,int,unsigned long);
 void pci_iounmap(struct pci_dev *,void *);
+/* Turing's vendor/unlock.c maps BAR0 with the plain Linux MMIO API (ioremap/iounmap +
+ * pci_resource_start) rather than Ampere's pci_iomap/pci_iounmap - a real gap found by
+ * tracing unlock.c's own external-symbol usage directly, not assumed from the Ampere
+ * shim being "copied unchanged" (see PORTING-PLAN.md). Added here rather than rewriting
+ * unlock.c to call pci_iomap instead, since nlzy's vendor source is kept pristine
+ * everywhere else. */
+void *ioremap(resource_size_t,resource_size_t);
+void iounmap(void *);
 int pci_save_state(struct pci_dev *);
 void pci_restore_state(struct pci_dev *);
 void pci_set_master(struct pci_dev *);

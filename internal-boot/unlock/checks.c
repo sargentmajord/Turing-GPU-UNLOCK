@@ -5,6 +5,7 @@
    supplies) is not Ampere-specific - it's generic PCI config-space validation
    parameterized entirely by machine-profile.h, the same way for any chip. */
 #include "checks.h"
+#include "machine-profile.h"
 #include <IndustryStandard/Pci.h>
 
 #define GU_CONFIG_BYTES 256U

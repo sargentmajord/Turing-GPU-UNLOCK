@@ -7,6 +7,8 @@ int devres_release_group(struct device *D,void *Group) {
   if(Group!=&D->scope || !D->scope)return -EINVAL;D->scope=false;return 0;
 }
 void usleep_range(unsigned long A,unsigned long B) {(void)B;GuStall(A);}
+void udelay(unsigned long Us) {GuStall(Us);}
+void msleep(unsigned long Ms) {GuStall(Ms*1000);}
 ktime_t ktime_get(void) {return Gu.ticks;}
 u32 readl(const void *P) {
   UINT64 Address=(UINTN)P;
@@ -90,10 +92,18 @@ int aperture_remove_conflicting_pci_devices(struct pci_dev *D,const char *Name) 
 int pci_enable_device_mem(struct pci_dev *D) {(void)D;return -EOPNOTSUPP;}
 void pci_disable_device(struct pci_dev *D) {(void)D;}
 resource_size_t pci_resource_len(struct pci_dev *D,int Bar) {(void)D;return Bar?0:Gu.bar_size;}
+resource_size_t pci_resource_start(struct pci_dev *D,int Bar) {(void)D;return Bar?0:Gu.bar_base;}
 void *pci_iomap(struct pci_dev *D,int Bar,unsigned long N) {
   (void)D;(void)N;return !Bar && Gu.owned && !Gu.fault?(VOID *)(UINTN)Gu.bar_base:NULL;
 }
 void pci_iounmap(struct pci_dev *D,void *P) {(void)D;(void)P;}
+/* Same single BAR0 mapping as pci_iomap(dev,0,...) above - see the comment on the
+ * compat.h declaration for why unlock.c needs this name instead. */
+void *ioremap(resource_size_t Start,resource_size_t Len) {
+  if(Start!=Gu.bar_base || Len>Gu.bar_size || !Gu.owned || Gu.fault)return NULL;
+  return (VOID *)(UINTN)Gu.bar_base;
+}
+void iounmap(void *P) {(void)P;}
 int pci_save_state(struct pci_dev *D) {(void)D;return EFI_ERROR(GuSavePci())?-EIO:0;}
 void pci_restore_state(struct pci_dev *D) {(void)D;if(EFI_ERROR(GuRestorePci()))Gu.fault=TRUE;}
 void pci_set_master(struct pci_dev *D) {

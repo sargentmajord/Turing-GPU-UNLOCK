@@ -3,7 +3,11 @@
 Written 2026-10-31. Status: the vendor transaction code, the safety-gate layer, and the console/asset-loading layer
 are ported. The entry point (`app.c`) exists but most of its checks are explicit stubs - see "The two-stage
 architecture" below for why, which is the main thing this plan got more precise about since it was first written.
-Nothing here has been tested against real hardware, and nothing here should be run against real hardware yet.
+As of the same day, the build itself has actually been exercised for the first time: both `build.ps1` modes
+compile and link to a valid EFI binary against a disposable scratch profile, and a synthetic-fixture register-
+level test (`tests/test_transaction.c`) proves `unlock.c` is internally self-consistent - see item 3 under "What's
+genuinely still ahead" for everything that was found and fixed to get there. Nothing here has been tested against
+real hardware, and nothing here should be run against real hardware yet.
 
 ## The two-stage architecture (found while writing app.c, not anticipated at first)
 
@@ -127,22 +131,48 @@ adaptation work is the same shape and (going by `gfw_eval.c`) a similar size to 
    sargentmajord/Windows-GPU-UNLOCK's `tests/test_transaction.c` proves the Ampere vendor code is at least
    internally consistent without real hardware.
 
-   **`internal-boot/unlock/build.ps1` and `verify_pe.py` - written, not run.** `build.ps1` is the actual
-   firmware-producing build (clang + lld-link, `-target x86_64-pc-windows-msvc -ffreestanding ...`, EFI-
-   application subsystem), adapted from the Ampere project's own `build.ps1`, deliberately scoped down to
-   the two modes `app.c`/`port.h` actually support (default preflight-only, and `-ExperimentalUnlock`) -
-   no `-AutomaticBoot`/`-InternalBoot`/`-HeadlessResearch`/`-StockProfile`, since none of those Ampere
-   research refinements have any Turing equivalent yet. The source list (`app`, `app_io`, `ownership`,
-   `format`, `runtime`, `sha256`, `checks`, `port`, `compat`, and the six vendor files above, `main.c`
-   excluded) was checked file-by-file against what each one actually `#include`s, not copied blindly.
-   `verify_pe.py` is copied unchanged - generic PE32+/EFI-application structure checks, nothing Ampere- or
-   Turing-specific in it. **Neither has actually been executed anywhere** - this environment has no
-   clang/lld-link toolchain installed to invoke them with (checked directly: not on PATH, not under
-   `C:\Program Files\LLVM`, not in any winget package/link directory). This is scaffolding, reviewed but
-   unverified, not a build that has produced an .EFI. Separately and by design, even with a toolchain,
-   compiling `app.c`/`checks.c` against `profiles/TEMPLATE/profile.h` (the only profile that exists) would
-   fail on that file's own `#error` - a real `profiles/<name>/profile.h` from an actual capture is still a
-   prerequisite, per "The two-stage architecture" above, not something this step can shortcut.
+   **`internal-boot/unlock/build.ps1` and `verify_pe.py` - written AND actually run, both build modes.**
+   `build.ps1` is the real firmware-producing build (clang + lld-link, `-target x86_64-pc-windows-msvc
+   -ffreestanding ...`, EFI-application subsystem), adapted from the Ampere project's own `build.ps1`,
+   deliberately scoped down to the two modes `app.c`/`port.h` actually support (default preflight-only,
+   and `-ExperimentalUnlock`) - no `-AutomaticBoot`/`-InternalBoot`/`-HeadlessResearch`/`-StockProfile`,
+   since none of those Ampere research refinements have any Turing equivalent yet. `verify_pe.py` is
+   copied unchanged - generic PE32+/EFI-application structure checks, nothing Ampere- or Turing-specific
+   in it.
+
+   This environment had no clang/lld-link toolchain at all (checked directly: not on PATH, not under
+   `C:\Program Files\LLVM`, not in any winget link directory) - installed LLVM 23.1.4 via the
+   `ClaudeElevatedRunner` task (the same elevated-task mechanism already used for the Ampere project's
+   installer test suite; a plain `winget install` from this session's own shell can't complete the
+   elevation prompt). With a real toolchain in hand, built **both** `build.ps1` modes (default and
+   `-ExperimentalUnlock`) end to end against a disposable, uncommitted scratch `profile.h` (same shape as
+   `profiles/TEMPLATE/profile.h`, just without its `#error` guard, built only to exercise the compiler/
+   linker plumbing - never meant to look like a real machine and deleted after use). Both produced a
+   valid PE32+/EFI-application binary that passed `verify_pe.py`'s own structural checks.
+
+   Doing this surfaced four real bugs that no amount of reading could have caught, because nothing had
+   ever actually tried to compile this project's `GU_UEFI_PORT` path before:
+   - `vendor/unlock.c` calls `ioremap()`/`iounmap()`/`pci_resource_start()` directly (Ampere's own
+     `unlock_610.c` uses `pci_iomap()`/`pci_iounmap()` instead, which is all `compat.h` had). Added the
+     missing three to `compat/compat.h` and `compat.c`, same single-BAR0 mapping `pci_iomap` already used.
+   - `vendor/unlock.c` also calls `udelay()` and `msleep()` directly - neither declared anywhere. Added
+     both to the compat shim too.
+   - `vendor/unlock.c`'s retained-resources warning calls `pci_err()` - also never declared. Added as a
+     `GuLog`-backed macro, the same pattern `dev_err`/`dev_info`/`pr_err`/`pr_info` already use.
+   - `vendor/firmware.h` `#include`s `<linux/device.h>` directly - the one PORTING-PLAN.md claim that
+     turned out wrong on a second check: the "four extra headers only `main.c` needs" list (in the
+     porting-technique section above) should not have included `device.h`, since `firmware.h` needs it
+     too. Added `compat/linux/device.h` forwarding to `compat.h`, the exact same one-line pattern every
+     other `compat/linux/*.h` file already uses.
+   And two bugs in this project's *own* app-layer files, not the vendor code or the shim:
+   - `app.c` and `checks.c` both reference profile macros (`GU_BOARD_ID`, `GU_CONFIG_CLASS_REV`,
+     `GU_TARGET_BUS`, etc.) but neither one actually `#include`d `machine-profile.h` anywhere in its own
+     include chain - `checks.c`'s own header comment even says this logic is "parameterized entirely by
+     machine-profile.h" without the file doing it. Added the missing `#include` to both.
+   - `app.c` declared two EFI_GUIDs (`GopGuid`, `PathGuid`) that are never referenced anywhere in the
+     file - harmless under a plain compile, but fatal under `build.ps1`'s own `-Werror`. Removed both
+     rather than silence the warning, since they were genuinely dead, not used by some `#ifdef` branch
+     this build mode skips.
 
    **`tests/test_layout.c` - done.** `layout.c`'s `turing_unlock_layout()` is pure arithmetic (no `readl`/`writel`,
    no DMA, no PCI - see item 1's correction above), so it compiles and runs standalone, no mocks needed. Checked
@@ -151,24 +181,31 @@ adaptation work is the same shape and (going by `gfw_eval.c`) a similar size to 
    those was independently worked out from the function's own align_down/align_up/sub_u64 chain before running
    it, then confirmed by actually running the binary, not the other way around).
 
-   **The big one - `tests/test_transaction.c`'s equivalent for `unlock.c` - deliberately not attempted this
-   pass.** Ampere's 770-line harness mocks PCI config space, MMIO and DMA at the register level and checks its
-   results against a REAL captured card's register values - a genuine hardware oracle. Turing has no equivalent
-   capture (same gap as `BarCheck`/`PromCheck`/`ColdCheck` in `app.c` - see "The two-stage architecture" above).
-   Two ways to get a Turing harness, and both have a real cost:
-   - Fabricate "plausible" expected register values without a capture. Rejected outright - this is exactly the
-     kind of guess dressed up as a fact the project's own standing rule is to avoid, and here it's worse than
-     usual: a wrong mock that happens to make the test pass would give false confidence in code that moves a
-     real GPU through FWSEC/GSP/SEC2 falcon boots.
-   - Hand-write a register-level GSP+SEC2 mock purely from reading `unlock.c`'s own register sequencing (no
-     external oracle at all, self-consistency only). Possible, but a single subtle bug in ~700+ lines of mock
-     code would silently validate the wrong thing - worse than no test, not better - and it would still prove
-     nothing about real TU102 behavior, only that `unlock.c` is internally consistent with itself. Worth doing
-     eventually, but it's a large, error-prone undertaking that deserves its own careful pass, not something to
-     rush alongside everything else in this one.
-   For now: `gfw_eval.c` already has `tests/test_gfw_eval.c`'s Ampere equivalent to port (small, pure logic, no
-   mock needed, same shape as `test_layout.c`) - that's the next cheap, safe test to add, before attempting the
-   big one.
+   **The big one - `tests/test_transaction.c`'s equivalent for `unlock.c` - done, a first pass.** Unlike
+   Ampere's 770-line harness, which checks its mock against a REAL captured card's register values (a
+   genuine hardware oracle), Turing has no equivalent capture (same gap as `BarCheck`/`PromCheck`/
+   `ColdCheck` in `app.c` - see "The two-stage architecture" above), so this harness has no external
+   oracle at all - every register offset and side effect was derived directly from reading `unlock.c`,
+   `boot.c`, `vbios.c` and `prep.c`'s own code (Turing's falcon reset/boot sequencing genuinely differs
+   from Ampere's - e.g. "no BCR switch on Turing", `flcn_reset()`'s own comment), not fabricated and not
+   copied from Ampere's differently-shaped mock. It proves `unlock.c` is internally self-consistent
+   end-to-end against a synthetic, hand-built fixture (fake firmware blobs + a synthetic FWSEC/VBIOS
+   image, no real board firmware contents, same posture as `tests/transaction_shim/vbios_fixture.h` in
+   the Ampere project) - built with clang (same toolchain as the real build; MSVC's `cl.exe` cannot
+   compile this file at all, since it rejects the GNU `void*` pointer arithmetic `unlock.c` relies on, a
+   portability gap in `cl.exe` for this particular file, not a bug in the pristine vendor source) and run.
+   Two scenarios pass: the full happy-path transaction (verified byte-for-byte: the published WPR
+   metadata, the radix-walked GSP image, the boot image copy, the Booter signature patch) and SEC2 never
+   reporting halted (correctly times out and the error-path PCIe FLR cleanup still frees every DMA buffer
+   and restores the PCI command register). Deliberately not full parity with Ampere's ~40-scenario suite
+   yet - see the file's own header comment for exactly what's not covered (the entry-time "reset
+   required" FLR branch, FWSEC's "WPR2 already up" fast path, GSP failing to boot, DMA/firmware-request
+   failure injection, the UEFI-port-only safety hooks, a non-page-aligned image size) - each would need
+   its own careful pass, the same reasoning that applied to not attempting this file's full scope in one
+   sitting.
+
+   `gfw_eval.c` already has `tests/test_gfw_eval.c`'s Ampere equivalent ported too (small, pure logic, no
+   mock needed, same shape as `test_layout.c`).
 4. **Card-acceptance logic - done**, in `port.h`'s `GuTargets` table and `port.c`'s `GuTargetConfig`: an exact
    allow-list of every (device, subsystem) PCI identity with an actual community-confirmed report, sourced
    directly from nlzy/turing-unlock's own issue tracker (issues #1, #2, #22, #25 - see `THIRD_PARTY_NOTICES.md`
