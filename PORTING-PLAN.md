@@ -118,9 +118,34 @@ adaptation work is the same shape and (going by `gfw_eval.c`) a similar size to 
    corrected the same way the "Dell-made" error was corrected above, by checking the primary source again instead
    of trusting what this document already said.
 3. **Get it compiling** against this project's host-side test harness, the same way
-   sargentmajord/Windows-GPU-UNLOCK's `tests/test_transaction.c` + `tests/transaction_shim/` prove the Ampere
-   vendor code is at least internally consistent without real hardware. This project doesn't have that harness
-   built out yet - it needs porting/adapting too, which is useful work that needs zero hardware.
+   sargentmajord/Windows-GPU-UNLOCK's `tests/test_transaction.c` proves the Ampere vendor code is at least
+   internally consistent without real hardware.
+
+   **`tests/test_layout.c` - done.** `layout.c`'s `turing_unlock_layout()` is pure arithmetic (no `readl`/`writel`,
+   no DMA, no PCI - see item 1's correction above), so it compiles and runs standalone, no mocks needed. Checked
+   it actually works, not just written and assumed: built it with MSVC (`cl /std:c17`) and ran it - all four
+   cases pass, including the hand-derived hex expected values for the synthetic 8 GiB layout (every one of
+   those was independently worked out from the function's own align_down/align_up/sub_u64 chain before running
+   it, then confirmed by actually running the binary, not the other way around).
+
+   **The big one - `tests/test_transaction.c`'s equivalent for `unlock.c` - deliberately not attempted this
+   pass.** Ampere's 770-line harness mocks PCI config space, MMIO and DMA at the register level and checks its
+   results against a REAL captured card's register values - a genuine hardware oracle. Turing has no equivalent
+   capture (same gap as `BarCheck`/`PromCheck`/`ColdCheck` in `app.c` - see "The two-stage architecture" above).
+   Two ways to get a Turing harness, and both have a real cost:
+   - Fabricate "plausible" expected register values without a capture. Rejected outright - this is exactly the
+     kind of guess dressed up as a fact the project's own standing rule is to avoid, and here it's worse than
+     usual: a wrong mock that happens to make the test pass would give false confidence in code that moves a
+     real GPU through FWSEC/GSP/SEC2 falcon boots.
+   - Hand-write a register-level GSP+SEC2 mock purely from reading `unlock.c`'s own register sequencing (no
+     external oracle at all, self-consistency only). Possible, but a single subtle bug in ~700+ lines of mock
+     code would silently validate the wrong thing - worse than no test, not better - and it would still prove
+     nothing about real TU102 behavior, only that `unlock.c` is internally consistent with itself. Worth doing
+     eventually, but it's a large, error-prone undertaking that deserves its own careful pass, not something to
+     rush alongside everything else in this one.
+   For now: `gfw_eval.c` already has `tests/test_gfw_eval.c`'s Ampere equivalent to port (small, pure logic, no
+   mock needed, same shape as `test_layout.c`) - that's the next cheap, safe test to add, before attempting the
+   big one.
 4. **Card-acceptance logic - done**, in `port.h`'s `GuTargets` table and `port.c`'s `GuTargetConfig`: an exact
    allow-list of every (device, subsystem) PCI identity with an actual community-confirmed report, sourced
    directly from nlzy/turing-unlock's own issue tracker (issues #1, #2, #22, #25 - see `THIRD_PARTY_NOTICES.md`
