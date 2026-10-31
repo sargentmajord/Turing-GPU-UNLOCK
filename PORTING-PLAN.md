@@ -94,10 +94,11 @@ adaptation work is the same shape and (going by `gfw_eval.c`) a similar size to 
 
 1. **Apply the UEFI adaptation to each vendor file**, following the exact pattern Ampere's `unlock_610.c` already
    shows (`#ifdef GU_UEFI_PORT` around target selection, BAR mapping and the one or two execution/cleanup hooks).
-   `gfw_eval.c` is the simplest (near 1:1 with Ampere's already-ported copy) and should go first as the template;
-   `unlock.c` is the largest (~975 lines) and does the real work (FWSEC/FRTS, GSP/SEC2 falcon staging, the SS0/SS1
-   selector writes). `layout.c`, `prep.c`, `vbios.c` carry the TU102-specific register layout and need the
-   constants below, not just mechanical adaptation.
+   `gfw_eval.c` is the simplest (near 1:1 with Ampere's already-ported copy) and already done. `unlock.c` is the
+   largest (~1000 lines) and does the real work (FWSEC/FRTS, GSP/SEC2 falcon staging, the SS0/SS1 selector
+   writes); its register-access hardening (`rd`/`wr` fault injection) and its two safety-state hooks are now done
+   too - see "unlock.c adaptation status" below. `layout.c`, `prep.c`, `vbios.c` carry the TU102-specific register
+   layout and need the constants below, not just mechanical adaptation - still ahead.
 2. **Swap in TU102-specific constants**, per `docs/Difference between Ampere and Turing.md` (copied from
    turing-unlock, reproduced below) and the register offsets already visible directly in `unlock.c`
    (`GSP_BASE=0x00110000`, `SEC_BASE=0x00840000`, `SEC_FALCON2=0x00841000`, `TU_FEAT_PLM=0x00409650`,
@@ -118,6 +119,32 @@ adaptation work is the same shape and (going by `gfw_eval.c`) a similar size to 
 5. **Real hardware validation**, which is a separate, later, higher-stakes step - nothing above needs a Turing
    card to do correctly, and nothing past this point should happen without a plan for recovering a card that gets
    stuck, the same diligence the Ampere project applied before its first real hardware run.
+
+## unlock.c adaptation status
+
+Turing's `unlock.c` already had `Gu.fault` injection in `rd()`/`wr()` (done in an earlier commit). Added in this
+pass, both checked directly against Ampere's already-ported `unlock_610.c` rather than guessed:
+
+- `GuStarted()` called right where the vendor code itself sets `w->gsp_started = true` and `w->sec_started = true`
+  (both immediately before the falcon's RUN bit is written) - these are the two points a transaction becomes
+  irreversible enough that `GuSafeToReturn()` must start refusing a return to Windows until a matching
+  `GuQuiesced()`.
+- `GuQuiesced()` called at the one point `firmware_quiesced(w)` (both falcons either never started or are
+  confirmed halted) is true and cleanup is about to proceed - the inverse of `w->retained = true`, which is the
+  path taken when it's *not* true.
+- A live PCI-identity reread added inside `sec_hs_fire`'s busy-wait loop (can run up to 5s), mirroring Ampere's
+  `falcon_hs()` `wait_plm` loop: guards against the BAR no longer pointing at the same card mid-wait (FLR,
+  hot-unplug, a driver reattaching). Compares against `Gu.target_device` (the runtime value `port.c`'s
+  `GuTargetConfig` already resolved) rather than a compile-time constant, since Turing's card identity is a
+  runtime allow-list (`GuTargets`), not Ampere's single compile-time `GU_BOARD_ID`.
+
+**Known gap, not yet closed:** the GSP side's equivalent long wait (`gsp_fwsec_frts`'s `poll(w, GSP_BASE + 0x100,
+..., 5000000, true)`) does not get the same per-iteration identity recheck, because it goes through the shared
+generic `poll()` helper that's also used for many short, hot-path waits elsewhere in the file (e.g. the
+256-byte-chunk loop in `sec_dma`) - adding a PCI config-space read to every `poll()` call would slow those down
+for no safety benefit and goes beyond what Ampere's own pattern does (Ampere only added this to one specific
+hand-written loop, not to a shared primitive). Closing this properly needs either a second poll variant or a
+hand-unrolled loop at that one call site, not a blanket change to `poll()`.
 
 ## The register/layout differences (from turing-unlock's own docs, TU102 vs the two Ampere variants)
 

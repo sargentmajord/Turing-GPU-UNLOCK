@@ -369,6 +369,9 @@ static int gsp_fwsec_frts(struct tu_work *w)
 		goto out;
 	}
 	w->gsp_started = true;
+#ifdef GU_UEFI_PORT
+	GuStarted();
+#endif
 	if (cpuctl & (1u << 6))
 		wr(w, GSP_BASE + 0x130, 1u << 1);
 	else
@@ -506,6 +509,9 @@ static int sec_hs_fire(struct tu_work *w, dma_addr_t meta)
 	GU_NOTE("sec fire (direct-via-dma): cpuctl=%#x meta=%#llx\n",
 		cpuctl, (unsigned long long)meta);
 	w->sec_started = true;
+#ifdef GU_UEFI_PORT
+	GuStarted();
+#endif
 	if (cpuctl & (1u << 6))
 		wr(w, SEC_BASE + 0x130, 1u << 1);
 	else
@@ -517,6 +523,21 @@ static int sec_hs_fire(struct tu_work *w, dma_addr_t meta)
 		cpuctl = rd(w, SEC_BASE + 0x100);
 		if (bad(cpuctl))
 			return GU_DIAG(-EIO);
+#ifdef GU_UEFI_PORT
+		/* Mirrors sargentmajord/Windows-GPU-UNLOCK's unlock_610.c falcon_hs()
+		 * wait_plm loop: this busy-wait can run up to 5s, so reread the live
+		 * PCI identity every iteration rather than trust the BAR mapping
+		 * still points at the same card (FLR, hot-unplug, a driver
+		 * reattaching mid-wait). Gu.target_device was already set by
+		 * port.c's GuTargetConfig during target identification - no
+		 * compile-time constant exists for Turing's runtime allow-list. */
+		{
+			u32 identity = ~0u;
+			if (pci_read_config_dword(w->pdev, PCI_VENDOR_ID, &identity) ||
+			    identity != Gu.target_device)
+				return GU_DIAG(-ENODEV);
+		}
+#endif
 		if (cpuctl & (1u << 4))
 			break;
 		if (ktime_compare(ktime_get(), deadline) >= 0) {
@@ -907,6 +928,9 @@ out:
 			ret = -EBUSY;
 		return ret;
 	}
+#ifdef GU_UEFI_PORT
+	GuQuiesced();
+#endif
 	if (w->bar) {
 		iounmap(w->bar);
 		w->bar = NULL;
