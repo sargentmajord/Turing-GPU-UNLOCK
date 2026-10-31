@@ -7,21 +7,39 @@
 #include <Protocol/DevicePath.h>
 #include <stddef.h>
 
-/* Only nlzy/turing-unlock's own confirmed result, not its whole "supported" list -
- * see the long comment on GuTargetConfig below before changing this. */
-#define GU_BOARD_ID 0x1e0710deu /* vendor 0x10de (NVIDIA), device 0x1e07 (TU102) */
-#error GU_BOARD_SUBSYSTEM is not filled in. The one card nlzy/turing-unlock has \
-  confirmed results on is a Dell-made RTX 2080 Ti 22GB (PCI ID 10de:1e07) - an \
-  unusual OEM workstation variant - but the exact subsystem vendor/device ID (the \
-  other half of a full PCI identity, usually what actually distinguishes one \
-  board partner's card from another's on the same device ID) was not available \
-  from the research that produced this scaffold. Checking device ID 0x1e07 alone \
-  is not enough: a standard retail 2080 Ti may well share that same device ID \
-  while being a genuinely different, unvalidated board - exactly the gap \
-  PORTING-PLAN.md and README.md warn about. Fill this in from a real, sourced \
-  read of the actual confirmed card (its own PCI config space, or nlzy's own \
-  test records) before removing this #error, not from a guess.
-#define GU_BOARD_SUBSYSTEM 0x00000000u /* placeholder - see the #error above */
+/* Every (device, subsystem) identity with an actual community-confirmed report of
+ * this unlock working, quoted directly from nlzy/turing-unlock's own issue tracker
+ * - not a guess, not a third-party database cross-reference. Every one of them is
+ * explicitly reported as a VRAM-modified "22GB" card, never a stock retail board -
+ * see PORTING-PLAN.md and README.md for why that matters. An earlier version of
+ * this file (and this project's own docs and a GitHub comment) incorrectly said
+ * "Dell-made" - that was wrong; "Dell" appears nowhere in any of these reports and
+ * has been corrected throughout.
+ *
+ * Sources (github.com/nlzy/turing-unlock):
+ *  - issue #1: device 10de:1e07, no subsystem given ("modified-memory card")
+ *  - issue #2 (iogotop): 10de:1e07 / 10de:12fa
+ *  - issue #2 (arbulin): 10de:1e07 / 10de:12a4 ("modified-memory")
+ *  - issue #2 (blackxwhite88): 10de:1e04 / 10de:12ae - note: the reporter
+ *    themselves calls this "a different device variant, not 1e07"
+ *  - issue #22 (both cards): 10de:1e07 / 10de:12fa ("modified-memory cards")
+ *  - issue #25: device 10de:1e04, no subsystem given, stock/modified not stated
+ *
+ * Only entries with BOTH a device id and a subsystem id actually reported are
+ * included below - issue #1 and #25 are cited above for context but contribute no
+ * table entry, since matching on device id alone would also match an unvalidated
+ * stock card that happens to share it. Refuse rather than guess: GuTargetConfig
+ * (port.c) accepts only an exact match against one of these rows, nothing else -
+ * including a standard, unmodified 2080 Ti, even if someone can get one to boot
+ * this far. If that is the card you actually have, this project does not (yet)
+ * consider it validated, on purpose. */
+#define GU_TARGET_COUNT 3
+typedef struct { UINT32 Device, Subsystem; const char *Source; } GU_TARGET;
+static const GU_TARGET GuTargets[GU_TARGET_COUNT] = {
+  {0x1e0710deu, 0x12fa10deu, "turing-unlock issue #2 (iogotop) / #22 (both cards)"},
+  {0x1e0710deu, 0x12a410deu, "turing-unlock issue #2 (arbulin)"},
+  {0x1e0410deu, 0x12ae10deu, "turing-unlock issue #2 (blackxwhite88) - device variant 1e04, not 1e07"},
+};
 
 #if defined(GU_HOST_WRITE_TEST) && __STDC_HOSTED__ != 1
 #error GU_HOST_WRITE_TEST is forbidden in firmware builds
@@ -58,6 +76,11 @@ typedef struct {
   UINT8 pcie_version;
   BOOLEAN fault, retained, started, quiesced, armed, owned, display_ok, saved;
   BOOLEAN profile_verified;
+  /* Which row of GuTargets actually matched this card, set once by GuTargetConfig
+   * and then checked by every later PCI-identity verification (GuSavePci, GuFlr,
+   * GuEnableMaster, GuClearMaster) instead of a single compiled-in constant, since
+   * there is no one reference identity here the way GU_BOARD_ID is for Ampere. */
+  UINT32 target_device, target_subsystem;
   BOOLEAN master_attributes_pending;
   UINT64 master_original_attributes;
   UINT16 master_original_command;
@@ -74,13 +97,13 @@ typedef struct {
 extern GU_PLATFORM Gu;
 
 VOID GuInit(EFI_BOOT_SERVICES *Bs, EFI_PCI_IO_PROTOCOL *Pci);
-/* True only for the one PCI identity (device + subsystem) this project is willing
- * to touch at all - see the long comment above GU_BOARD_SUBSYSTEM. Deliberately
- * narrower than nlzy/turing-unlock's own supported_ids[] list (kernel/turing_unlock/main.c),
- * which includes several TU102 device IDs plus TU104 and TU106 marked "(not tested)"
- * in its own source, none of which have any confirmed result anywhere. Refuse
- * rather than guess, the same posture sargentmajord/Windows-GPU-UNLOCK's installer
- * already takes for Ampere cards. */
+/* True only for an exact (device, subsystem) match against GuTargets above, in
+ * which case Gu.target_device/target_subsystem are set to the matching row for
+ * later checks to use. Deliberately narrower than nlzy/turing-unlock's own
+ * supported_ids[] list (kernel/turing_unlock/main.c), which includes several
+ * TU102 device IDs plus TU104 and TU106 marked "(not tested)" in its own source.
+ * Refuse rather than guess, the same posture sargentmajord/Windows-GPU-UNLOCK's
+ * installer already takes for Ampere cards. */
 BOOLEAN GuTargetConfig(const UINT32 *Config, UINTN Segment, UINTN Bus, UINTN Device, UINTN Function);
 BOOLEAN GuSafeToReturn(VOID);
 EFI_STATUS GuDmaAllocate(UINTN Bytes, VOID **Cpu, UINT64 *Dma);

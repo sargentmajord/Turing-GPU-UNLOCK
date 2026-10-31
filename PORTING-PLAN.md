@@ -73,11 +73,13 @@ adaptation work is the same shape and (going by `gfw_eval.c`) a similar size to 
    sargentmajord/Windows-GPU-UNLOCK's `tests/test_transaction.c` + `tests/transaction_shim/` prove the Ampere
    vendor code is at least internally consistent without real hardware. This project doesn't have that harness
    built out yet - it needs porting/adapting too, which is useful work that needs zero hardware.
-4. **A target-card entry in the project's own card-acceptance logic** (the equivalent of
-   sargentmajord/Windows-GPU-UNLOCK's `installer/CardSelect.ps1` refusing anything outside an accepted ID list) -
-   this project should refuse any card that isn't the one documented PCI ID turing-unlock itself has confirmed
-   (`10de:1e07`, the Dell RTX 2080 Ti 22GB), the same "refuse rather than guess" posture the Ampere installer
-   already takes, until more hardware is actually validated.
+4. **Card-acceptance logic - done**, in `port.h`'s `GuTargets` table and `port.c`'s `GuTargetConfig`: an exact
+   allow-list of every (device, subsystem) PCI identity with an actual community-confirmed report, sourced
+   directly from nlzy/turing-unlock's own issue tracker (issues #1, #2, #22, #25 - see `THIRD_PARTY_NOTICES.md`
+   and the comment above `GuTargets` for the exact citations). Every one of them is a third-party VRAM-modified
+   "22GB" card, not a stock retail 2080 Ti - see "Known validation gap" below. This intentionally refuses a
+   standard card even if it shares a device ID with one of the table entries, the same "refuse rather than guess"
+   posture the Ampere installer already takes.
 5. **Real hardware validation**, which is a separate, later, higher-stakes step - nothing above needs a Turing
    card to do correctly, and nothing past this point should happen without a plan for recovering a card that gets
    stuck, the same diligence the Ampere project applied before its first real hardware run.
@@ -114,17 +116,38 @@ Behavioral notes from the same source: TU102 and GA102 both check FRTS/WPR2 read
 should not be assumed for TU102; full-teardown addresses are not interchangeable between chips even where they
 look similar.
 
-## Also worth upstreaming
+## Also worth upstreaming - done here
 
 Ampere's `vendor/gfw_eval.c` in sargentmajord/Windows-GPU-UNLOCK has a bad-value check Turing's upstream
-`gfw_eval.c` doesn't yet have: rejecting `0xbadfxxxx` register-error values as "not a finished firmware boot"
-(credited there to upstream Zagitta/gpu-unlock issue #42). Since this project's `gfw_eval.c` is practically the
-same file, the same fix should be carried over here too when this file gets its UEFI pass - it's a correctness fix,
-not Ampere-specific.
+`gfw_eval.c` didn't have: rejecting `0xbadfxxxx` register-error values as "not a finished firmware boot" (credited
+there to upstream Zagitta/gpu-unlock issue #42). Carried over into this project's `gfw_eval.c` - see the commit
+history. Worth reporting upstream to nlzy/turing-unlock too, since it's a correctness fix, not Ampere-specific.
 
 ## Known validation gap (read this before testing anything on real hardware)
 
-turing-unlock itself is confirmed on exactly one SKU: a Dell-made RTX 2080 Ti 22GB (TU102, PCI ID `10de:1e07`), an
-unusual OEM workstation variant - not the standard retail 11GB 2080 Ti most people, including the person who
-offered to test this, actually have. A UEFI port being correct does not establish that the underlying unlock
-sequence is safe on other Turing SKUs; that's a separate, larger gap than "has this been ported to Windows yet."
+**Correction, 2026-10-31:** an earlier version of this document (and this project's README.md,
+THIRD_PARTY_NOTICES.md, and a GitHub comment) said the one validated card was "Dell-made." That was wrong -
+checked again directly against nlzy/turing-unlock's own issue tracker, and "Dell" appears nowhere in any report.
+Corrected throughout.
+
+What's actually there, quoted directly from github.com/nlzy/turing-unlock's issues (not a third-party database,
+not a guess):
+
+| Issue | Device | Subsystem | Described as |
+|---|---|---|---|
+| #1 | `10de:1e07` | not given | "modified-memory card" |
+| #2 (iogotop) | `10de:1e07` | `10de:12fa` | "modified-memory cards" (dual-card/NVLink) |
+| #2 (arbulin) | `10de:1e07` | `10de:12a4` | "modified-memory" |
+| #2 (blackxwhite88) | `10de:1e04` | `10de:12ae` | reporter: "a different device variant, not 1e07" |
+| #22 (both cards) | `10de:1e07` | `10de:12fa` | "modified-memory cards" (dual-card/NVLink) |
+| #25 | `10de:1e04` | not given | stock/modified not stated |
+
+Every report that says anything about it describes a third-party VRAM-modified "22GB" card - never a stock retail
+2080 Ti (which ships with 11 GB). The subsystem IDs differ between individual reporters even at the same device
+ID (`1e07` shows both `12fa` and `12a4`), so there is no single clean "the reference card" the way Ampere has one
+- these are a handful of different modded boards, not one well-documented machine. `port.h`'s `GuTargets` table
+is an exact allow-list of the rows above that have both a device and a subsystem id; a standard, unmodified 2080
+Ti - which is most likely what anyone offering to test this actually has - will not match any of them, on
+purpose. A UEFI port being correct does not establish that the underlying unlock sequence is safe on a card
+outside this table; that's a separate, larger gap than "has this been ported to Windows yet," and it is the
+reason this project does not consider a standard 2080 Ti validated at all right now.

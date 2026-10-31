@@ -10,10 +10,12 @@ what's genuinely still ahead before this is anything you could point at real har
 
 ## Known validation gap
 
-The only Turing card `turing-unlock` itself has confirmed working is a Dell-made RTX 2080 Ti 22GB (an unusual OEM
-workstation variant, PCI ID `10de:1e07`) - not the standard retail 2080 Ti. A correct Windows port of the mechanism
-does not by itself make it safe on other Turing cards. Read [PORTING-PLAN.md](PORTING-PLAN.md) before assuming
-otherwise.
+Every card `turing-unlock` has a community-confirmed report for (github.com/nlzy/turing-unlock issues #1, #2, #22,
+#25) is explicitly described by its own reporter as a third-party **VRAM-modified "22GB" card** - never a stock
+retail 2080 Ti. (An earlier version of this file said "Dell-made"; that was wrong and has been corrected - "Dell"
+appears nowhere in any of these reports.) A correct Windows port of the mechanism does not by itself make it safe
+on a standard, unmodified card, even one sharing the same PCI device ID. Read [PORTING-PLAN.md](PORTING-PLAN.md)
+before assuming otherwise.
 
 ## Credits
 

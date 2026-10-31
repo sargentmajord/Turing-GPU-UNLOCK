@@ -15,12 +15,16 @@ is not done, and why.
 
 - Source: [nlzy/turing-unlock](https://github.com/nlzy/turing-unlock), pinned commit `417f333263ff169e8f449c931b70db9dfd7b8ef4`.
 - Used in: `internal-boot/unlock/vendor/` (`unlock.c`, `boot.c`, `layout.c`, `prep.c`, `vbios.c`, `gfw_eval.c`, and their
-  headers), as a Turing port of Zagitta/gpu-unlock. Confirmed by its own documentation to work on exactly one card so far:
-  a Dell-made RTX 2080 Ti 22GB (TU102, PCI ID `10de:1e07`). `main.c` is kept for provenance but is not ported - its role
-  (Linux PCI driver registration, async probe, module init) has no UEFI equivalent and is replaced by this project's own
-  single-shot entry point, the same way the Ampere port replaces Zagitta's equivalent file.
-- No changes have been made to the vendored source yet beyond what's tracked in this repository's own history - see
-  [PORTING-PLAN.md](PORTING-PLAN.md) for what adaptation is planned and why.
+  headers), as a Turing port of Zagitta/gpu-unlock. Community-confirmed, per its own issue tracker (issues #1, #2, #22,
+  #25), on several third-party VRAM-modified "22GB" RTX 2080 Ti cards (TU102, device IDs `10de:1e07` and `10de:1e04`) -
+  never a stock retail card. `main.c` is kept for provenance but is not ported - its role (Linux PCI driver
+  registration, async probe, module init) has no UEFI equivalent and is replaced by this project's own single-shot
+  entry point, the same way the Ampere port replaces Zagitta's equivalent file.
+- Changes made in this project so far: `gfw_eval.c` gained the same `0xbadf`-error-value rejection Ampere's port
+  already carries (upstream Zagitta/gpu-unlock issue #42); `unlock.c`'s register access was hardened with bounds
+  checking and a fault-injection hook (see PORTING-PLAN.md). The card-identity table in `port.h` (`GuTargets`) is
+  this project's own addition, built from the exact (device, subsystem) pairs reported in the issues cited above -
+  not part of nlzy/turing-unlock's own source.
 
 ## GPU unlock core - Zagitta/gpu-unlock, GPL-2.0-only
 

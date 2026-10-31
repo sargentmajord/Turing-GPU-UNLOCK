@@ -12,7 +12,21 @@ VOID GuInit(EFI_BOOT_SERVICES *Bs, EFI_PCI_IO_PROTOCOL *Pci) {
   memset(&Gu, 0, sizeof(Gu)); Gu.bs = Bs; Gu.pci = Pci;
 }
 BOOLEAN GuTargetConfig(const UINT32 *C, UINTN S, UINTN B, UINTN D, UINTN F) {
-  return C && !S && B == 1 && !D && !F && C[0] == GU_BOARD_ID && C[11] == GU_BOARD_SUBSYSTEM;
+  UINTN I;
+  /* Same extra defense-in-depth checks the Ampere port's GuTargetConfig has, not
+   * just device+subsystem: class code byte == 3 (PCI class 0x03, display
+   * controller - this is actually a GPU) and header type == 0 (a normal device,
+   * not a bridge). Cheap, and catches a device-ID collision with something that
+   * is not even a graphics card. */
+  if (!C || S || B != 1 || D || F || (C[2] >> 24) != 3 || ((C[3] >> 16) & 0x7f)) return FALSE;
+  for (I = 0; I < GU_TARGET_COUNT; I++) {
+    if (C[0] == GuTargets[I].Device && C[11] == GuTargets[I].Subsystem) {
+      Gu.target_device = GuTargets[I].Device;
+      Gu.target_subsystem = GuTargets[I].Subsystem;
+      return TRUE;
+    }
+  }
+  return FALSE;
 }
 /* Same shape as the Ampere port's GuSafeToReturn: only true once every latch
  * that would mean "do not trust this card's state" is clear. This is the gate
@@ -124,7 +138,7 @@ EFI_STATUS GuEnableMaster(VOID) {
   if (GU_PREFLIGHT_ONLY || !Gu.profile_verified || Gu.fault || Gu.retained || Gu.started || Gu.master_attributes_pending ||
       !Gu.pci || !Gu.pci->Attributes || !Gu.owned || !Gu.armed || !Gu.display_ok) goto fail;
   Status = RawRead(EfiPciIoWidthUint32, 0, &Id);
-  if (EFI_ERROR(Status) || Id != GU_BOARD_ID) goto fail;
+  if (EFI_ERROR(Status) || Id != Gu.target_device) goto fail;
   Status = RawRead(EfiPciIoWidthUint16, 4, &Command);
   if (EFI_ERROR(Status) || Command == 0xffff || (Command & 4) || !(Command & 2)) goto fail;
   Status = Gu.pci->Attributes(Gu.pci, EfiPciIoAttributeOperationSupported, 0, &Supported);
@@ -164,7 +178,7 @@ EFI_STATUS GuClearMaster(VOID) {
   if (GU_PREFLIGHT_ONLY) return EFI_ACCESS_DENIED;
   /* Containment remains permitted after a latched I/O failure. */
   Status = RawRead(EfiPciIoWidthUint32, 0, &Id);
-  if (EFI_ERROR(Status) || Id != GU_BOARD_ID) goto fail;
+  if (EFI_ERROR(Status) || Id != Gu.target_device) goto fail;
   if (Gu.master_attributes_pending) {
     if (Gu.pci != Gu.master_pci) AttributeStatus = EFI_COMPROMISED_DATA;
     else if (!Gu.pci->Attributes) AttributeStatus = EFI_UNSUPPORTED;
@@ -209,7 +223,7 @@ EFI_STATUS GuSavePci(VOID) {
   if (Gu.saved || Gu.fault || !Gu.owned || Gu.pcie_cap < 0x40 || Gu.pcie_cap > 0xd4) return EFI_NOT_READY;
   for (I = 0; I < 64; I++)
     if (EFI_ERROR(GuConfigRead(EfiPciIoWidthUint32, (UINT32)I * 4, &Gu.saved_config[I]))) return EFI_DEVICE_ERROR;
-  if (Gu.saved_config[0] != GU_BOARD_ID || Gu.saved_config[11] != GU_BOARD_SUBSYSTEM ||
+  if (Gu.saved_config[0] != Gu.target_device || Gu.saved_config[11] != Gu.target_subsystem ||
       (Gu.saved_config[1] & 4)) return EFI_ACCESS_DENIED;
   if (EFI_ERROR(GuConfigRead(EfiPciIoWidthUint16, Gu.pcie_cap + 8, &Gu.saved_devctl))) return EFI_DEVICE_ERROR;
   if (Gu.saved_devctl & 0x8000) return EFI_NOT_READY;
@@ -221,7 +235,7 @@ EFI_STATUS GuFlr(VOID) {
   UINT32 Identity = 0, Capability = 0; UINT16 Command = 0xffff, Pending = 0xffff, Ctl = 0;
   UINTN Wait; EFI_STATUS ResetStatus;
   if (GU_PREFLIGHT_ONLY || !Gu.profile_verified || !Gu.saved || Gu.flrs || Gu.fault || !Gu.owned || !Gu.armed || !Gu.display_ok) return EFI_NOT_READY;
-  if (EFI_ERROR(GuConfigRead(EfiPciIoWidthUint32, 0, &Identity)) || Identity != GU_BOARD_ID ||
+  if (EFI_ERROR(GuConfigRead(EfiPciIoWidthUint32, 0, &Identity)) || Identity != Gu.target_device ||
       EFI_ERROR(GuConfigRead(EfiPciIoWidthUint16, 4, &Command)) || Command == 0xffff ||
       (Command & 4) || !(Command & 2) ||
       EFI_ERROR(GuConfigRead(EfiPciIoWidthUint32, Gu.pcie_cap + 4, &Capability)) ||
@@ -241,7 +255,7 @@ EFI_STATUS GuFlr(VOID) {
   if (EFI_ERROR(ResetStatus)) return EFI_DEVICE_ERROR;
   for (Wait = 0; Wait <= 1000000; Wait += 1000) {
     EFI_STATUS Status = RawRead(EfiPciIoWidthUint32, 0, &Identity);
-    if (!EFI_ERROR(Status) && Identity == GU_BOARD_ID) return EFI_SUCCESS;
+    if (!EFI_ERROR(Status) && Identity == Gu.target_device) return EFI_SUCCESS;
     if (!EFI_ERROR(Status) && Identity != 0xffffffffU && Identity != 0) break;
     if (Wait < 1000000) GuStall(1000);
   }
