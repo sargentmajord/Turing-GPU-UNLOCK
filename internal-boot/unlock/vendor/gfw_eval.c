@@ -15,6 +15,13 @@ int turing_unlock_gfw_assess(const struct turing_unlock_gfw_sample *sample)
 	if (sample->plm == (u32)~0U || sample->boot == (u32)~0U ||
 	    sample->cpuctl == (u32)~0U)
 		return -ENODEV;
+	/* Register-error values (0xbadfxxxx) are not a finished firmware boot (upstream issue 42).
+	 * Carried over from sargentmajord/Windows-GPU-UNLOCK's Ampere port, which has this same fix
+	 * in its own vendor/gfw_eval.c - this file otherwise matches nlzy/turing-unlock's original. */
+	if ((sample->plm & 0xffff0000u) == 0xbadf0000u ||
+	    (sample->boot & 0xffff0000u) == 0xbadf0000u ||
+	    (sample->cpuctl & 0xffff0000u) == 0xbadf0000u)
+		return -ENODEV;
 	if (!(sample->cpuctl & GU_GFW_CPUCTL_HALTED))
 		return -EAGAIN;
 	if (!(sample->plm & GU_GFW_PLM_LEVEL0))

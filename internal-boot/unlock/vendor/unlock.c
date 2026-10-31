@@ -19,6 +19,10 @@
 #include "unlock.h"
 #include "vbios.h"
 
+#ifdef GU_UEFI_PORT
+#include "../port.h"
+#endif
+
 #define GSP_BASE 0x00110000u
 #define GSP_FBIF 0x00110600u
 
@@ -70,10 +74,28 @@ struct tu_work {
 	u32 last_off, last_val;
 };
 
+/* Bounds-checked against bar_len and, under the UEFI port, an injected-fault hook
+ * for the host-side test harness - see sargentmajord/Windows-GPU-UNLOCK's
+ * vendor/unlock_610.c read_bar()/write_bar(), which this mirrors. Returns the
+ * already-pervasive bad()-sentinel (~0u) on either failure, so every existing
+ * bad(rd(...)) call site in this file keeps working unchanged - no caller edits
+ * needed. There is no kernel MMU/fault handler to catch a bad offset here the
+ * way there would be under Linux, so this check is not optional under UEFI. */
 static u32 rd(struct tu_work *w, u32 off)
 {
-	u32 v = readl(w->bar + off);
+	u32 v;
 
+#ifdef GU_UEFI_PORT
+	if (Gu.fault)
+		return ~0u;
+#endif
+	if (off > w->bar_len || w->bar_len - off < 4)
+		return ~0u;
+	v = readl(w->bar + off);
+#ifdef GU_UEFI_PORT
+	if (Gu.fault)
+		return ~0u;
+#endif
 	w->last_off = off;
 	w->last_val = v;
 	return v;
@@ -81,6 +103,12 @@ static u32 rd(struct tu_work *w, u32 off)
 
 static void wr(struct tu_work *w, u32 off, u32 val)
 {
+#ifdef GU_UEFI_PORT
+	if (Gu.fault)
+		return;
+#endif
+	if (off > w->bar_len || w->bar_len - off < 4)
+		return;
 	w->last_off = off;
 	w->last_val = val;
 	writel(val, w->bar + off);
