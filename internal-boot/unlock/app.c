@@ -13,6 +13,8 @@
 #include "app.h"
 #include "app_io.h"
 #include "compat/compat.h"
+#include "checks.h"
+#include "ownership.h"
 #include "sha256.h"
 #include "vendor/unlock.h"
 #include "vendor/gfw_eval.h"
@@ -25,6 +27,7 @@ static EFI_GUID PciGuid = EFI_PCI_IO_PROTOCOL_GUID, GopGuid = EFI_GRAPHICS_OUTPU
 static EFI_SYSTEM_TABLE *Table;
 static UINT32 InitialConfig[64];
 static const char *Stage;
+static GU_RELEASE_OWNER PendingOwner;
 
 static EFI_STATUS Step(EFI_STATUS Status) {
   GuLog("CHECK stage=%s status=%#llx\n", Stage, (unsigned long long)Status);
@@ -130,21 +133,55 @@ static BOOLEAN DisplayCheck(VOID) {
   GuLogText("DisplayCheck: not implemented - needs a real machine profile, see PORTING-PLAN.md.\n");
   return FALSE;
 }
-/* Needs GU_CONFIG_CLASS_REV/GU_MSIX_CAP_OFFSET/GU_MSIX_CAP_DWORD from a real
- * capture, plus checks.c (GuCheckConfig/GU_CAPS) ported from the Ampere
- * project - neither exists here yet. */
+/* ---- These two are real now: checks.c and ownership.c are both ported (see
+ * their own file headers - neither has any Ampere-specific content, so nothing
+ * here is blocked on a real machine profile the way BarCheck/PromCheck/ColdCheck/
+ * DisplayCheck above are). GuCheckConfig still checks GU_CONFIG_CLASS_REV/
+ * GU_BOARD_ID/etc. from whatever profile.h is in use - against the TEMPLATE
+ * profile those are all placeholders, so this will correctly refuse, not
+ * silently pass, until a real profile exists. ---- */
 static EFI_STATUS ConfigCheck(BOOLEAN Save) {
-  (void)Save;
-  GuLogText("ConfigCheck: not implemented - needs checks.c ported and a real machine profile, see PORTING-PLAN.md.\n");
-  return EFI_UNSUPPORTED;
+  UINT32 config[64]; GU_CAPS caps; UINTN segment, bus, device, function;
+  EFI_STATUS status = Gu.pci->GetLocation(Gu.pci, &segment, &bus, &device, &function);
+  GuLog("target location: status=%#llx\n", (unsigned long long)status);
+  if (EFI_ERROR(status)) return status;
+  status = ReadConfig(config); if (EFI_ERROR(status)) return status;
+  BOOLEAN checked = GuCheckConfig(config, segment, bus, device, function, &caps);
+  BOOLEAN valid = checked && config[2] == GU_CONFIG_CLASS_REV && config[GU_MSIX_CAP_OFFSET / 4] == GU_MSIX_CAP_DWORD &&
+    config[0x10 / 4] == GU_BAR0_BASE && !(config[(caps.pcie + 8) / 4] & 0x00200000U);
+  BOOLEAN same = Save || !memcmp(config, InitialConfig, sizeof(config));
+  if (Save || !valid || !same) ConfigLog(config);
+  GuLog("target BDF=%zu:%zu:%zu.%zu checks=%u pm=%#x pcie=%#x msi=%#x msix=%#x\n",
+    (size_t)segment, (size_t)bus, (size_t)device, (size_t)function, checked,
+    (unsigned)caps.pm, (unsigned)caps.pcie, (unsigned)caps.msi, (unsigned)caps.msix);
+  if (!valid) return EFI_UNSUPPORTED;
+  if (!same) return EFI_NOT_READY;
+  if (Save) memcpy(InitialConfig, config, sizeof(config));
+  Gu.pm_cap = caps.pm; Gu.pcie_cap = caps.pcie; Gu.pcie_version = caps.pcie_version; Gu.msi_cap = caps.msi; Gu.msix_cap = caps.msix;
+  return EFI_SUCCESS;
 }
-/* Needs ownership.c (GuClaimController/GuFindReleaseOwner/GuRefreshTargetPci)
- * ported from the Ampere project - not done here yet, and lower priority than
- * the profile-dependent checks above since it has no Turing-specific content to
- * work out, just needs porting. */
+/* Manual-unlock keypress flow only - no automatic-boot mode here (see the file
+ * header). Still correctly gated behind Gu.profile_verified, which only
+ * ColdCheck ever sets, and ColdCheck is a stub - so this cannot actually arm
+ * anything yet either, but the mechanics (prompt, read U/Esc, 30s timeout) are
+ * real and need nothing machine-specific. */
 static EFI_STATUS Arm(VOID) {
-  GuLogText("Arm: not implemented - needs ownership.c ported, see PORTING-PLAN.md.\n");
-  return EFI_UNSUPPORTED;
+  if (!Gu.profile_verified || Gu.fault || !Gu.display_ok) return EFI_ACCESS_DENIED;
+  if (!Table->ConIn || !Table->ConIn->Reset || !Table->ConIn->ReadKeyStroke) return EFI_UNSUPPORTED;
+  EFI_STATUS status = Table->ConIn->Reset(Table->ConIn, FALSE); if (EFI_ERROR(status)) return status;
+  GuLogText("EXPERIMENTAL MANUAL UNLOCK: verified PROM and assets.\n");
+  if (PendingOwner.agent) GuLogText("U will release the RTX firmware driver, restore verified access settings if needed, then recheck and attempt once.\n");
+  GuLogText("Press U to attempt once; Esc or 30-second timeout cancels.\n");
+  if (!GuLogReady()) return EFI_DEVICE_ERROR;
+  for (UINTN i = 0; i < 300; i++) {
+    EFI_INPUT_KEY key; status = Table->ConIn->ReadKeyStroke(Table->ConIn, &key);
+    if (!EFI_ERROR(status)) {
+      if (key.ScanCode == 0x17 || key.UnicodeChar == 27) return EFI_ABORTED;
+      if (key.UnicodeChar == 'u' || key.UnicodeChar == 'U') return Gu.profile_verified && !Gu.fault ? EFI_SUCCESS : EFI_ACCESS_DENIED;
+    } else if (status != EFI_NOT_READY) return status;
+    GuStall(100000);
+  }
+  return EFI_TIMEOUT;
 }
 
 /* ---- Entry point. The flow mirrors the Ampere app.c exactly in shape - read
@@ -156,7 +193,7 @@ static EFI_STATUS Arm(VOID) {
 EFI_STATUS EFIAPI efi_main(EFI_HANDLE Image, EFI_SYSTEM_TABLE *St) {
   if (!St || !St->BootServices || !St->RuntimeServices) return EFI_INVALID_PARAMETER;
   Table = St; GuInit(St->BootServices, NULL); Gu.image = Image; Gu.display_check = DisplayCheck;
-  Stage = "usb-log"; EFI_STATUS status = GuIoOpen(Image, St); BOOLEAN attempted = FALSE;
+  Stage = "usb-log"; EFI_STATUS status = GuIoOpen(Image, St); BOOLEAN attempted = FALSE, release_attempted = FALSE;
   if (EFI_ERROR(status)) goto finish;
   GuLogText("BUILD MODE: early-stage port, most checks are stubs - see PORTING-PLAN.md.\n");
   UINT8 secure = 0xff; UINTN bytes = 1;
@@ -170,23 +207,83 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE Image, EFI_SYSTEM_TABLE *St) {
   Stage = "bar0"; status = Step(BarCheck()); if (EFI_ERROR(status)) goto finish;
   Stage = "prom"; status = Step(PromCheck()); if (EFI_ERROR(status)) goto finish;
   Stage = "diagnostic-cold-state"; status = Step(ColdCheck());
-  goto finish; /* GU_PREFLIGHT_ONLY is always true until the checks above are real - see PORTING-PLAN.md */
+#if !defined(GU_EXPERIMENTAL_UNLOCK)
+  goto finish;
+#else
+  if (EFI_ERROR(status)) goto finish;
+#endif
+  Stage = "ownership"; status = GuClaimController();
+  if (status == EFI_ACCESS_DENIED) {
+    status = GuFindReleaseOwner(St, &PendingOwner, TRUE);
+    if (!EFI_ERROR(status)) GuLogText("Exclusive ownership deferred until manual U and explicit driver release.\n");
+  }
+  status = Step(status); if (EFI_ERROR(status)) goto finish;
+  Stage = "config-recheck"; status = Step(ConfigCheck(FALSE)); if (EFI_ERROR(status)) goto finish;
+  Stage = "bar0"; status = Step(BarCheck()); if (EFI_ERROR(status)) goto finish;
+  Stage = "prom"; status = Step(PromCheck()); if (EFI_ERROR(status)) goto finish;
+  Stage = "cold-state"; status = Step(ColdCheck()); if (EFI_ERROR(status)) goto finish;
+  Stage = "assets"; status = Step(GuLoadAssets()); if (EFI_ERROR(status)) goto finish;
+  Stage = "arming"; status = Step(Arm()); if (EFI_ERROR(status)) goto finish;
+  Stage = "armed-config"; status = Step(ConfigCheck(FALSE)); if (EFI_ERROR(status)) goto finish;
+  Stage = "armed-display"; Gu.display_ok = DisplayCheck(); status = Step(Gu.display_ok ? EFI_SUCCESS : EFI_UNSUPPORTED); if (EFI_ERROR(status)) goto finish;
+  Stage = "armed-cold-state"; status = Step(ColdCheck()); if (EFI_ERROR(status)) goto finish;
+  if (PendingOwner.agent) {
+    GU_RELEASE_OWNER current;
+    Stage = "owner-recheck";
+    GuLogText("Manual U confirmed: release RTX firmware driver once, then revalidate.\n");
+    if (!GuLogReady()) { status = EFI_DEVICE_ERROR; goto finish; }
+    status = GuFindReleaseOwner(St, &current, FALSE);
+    if (!EFI_ERROR(status) && !GuSameReleaseOwner(&PendingOwner, &current)) status = EFI_ABORTED;
+    if (EFI_ERROR(status)) { status = Step(status); goto finish; }
+    EFI_PCI_IO_PROTOCOL *prior = Gu.pci;
+    Stage = "driver-release"; Gu.armed = TRUE; Gu.pci = NULL; release_attempted = TRUE;
+    EFI_STATUS released = Gu.bs->DisconnectController(Gu.handle, current.agent, NULL);
+    EFI_TPL refresh_tpl = Gu.bs->RaiseTPL(TPL_NOTIFY);
+    EFI_STATUS refreshed = GuRefreshTargetPci();
+    Gu.bs->RestoreTPL(refresh_tpl);
+    GuLog("driver release: status=%#llx refresh=%#llx same_pci=%u\n",
+      (unsigned long long)released, (unsigned long long)refreshed, (unsigned)(Gu.pci == prior));
+    status = Step(EFI_ERROR(released) ? released : EFI_ERROR(refreshed) ? refreshed : Gu.pci != prior ? EFI_COMPROMISED_DATA : EFI_SUCCESS);
+    if (EFI_ERROR(status)) goto finish;
+    Stage = "ownership-after-release"; status = Step(GuClaimController()); if (EFI_ERROR(status)) goto finish;
+    Stage = "display-after-release"; Gu.display_ok = DisplayCheck(); status = Step(Gu.display_ok ? EFI_SUCCESS : EFI_UNSUPPORTED); if (EFI_ERROR(status)) goto finish;
+    Stage = "config-after-release"; status = Step(ConfigCheck(FALSE)); if (EFI_ERROR(status)) goto finish;
+    Stage = "bar0-after-release"; status = Step(BarCheck()); if (EFI_ERROR(status)) goto finish;
+    Stage = "prom-after-release"; status = Step(PromCheck()); if (EFI_ERROR(status)) goto finish;
+    Stage = "cold-after-release"; status = Step(ColdCheck()); if (EFI_ERROR(status)) goto finish;
+  }
+  Stage = "final-prom"; status = Step(PromCheck()); if (EFI_ERROR(status)) goto finish;
+  Stage = "final-cold"; status = Step(ColdCheck()); if (EFI_ERROR(status)) goto finish;
+  if (!Gu.profile_verified || Gu.fault) { status = EFI_ACCESS_DENIED; goto finish; }
+  GuLogText("ARMED: one transaction is starting. Do not reset or remove the USB.\n");
+  if (!GuLogReady()) { status = EFI_DEVICE_ERROR; goto finish; }
+  Stage = "transaction"; Gu.armed = TRUE; attempted = TRUE;
+  UINT64 mask = 0xffffffffULL;
+  struct pci_dev device = { .dev = { .dma_mask = &mask, .coherent_dma_mask = 0xffffffffULL }, .pm_cap = Gu.pm_cap, .refs = 1 };
+  int result = turing_unlock_card(&device);
+  EFI_STATUS contained = GuClearMaster();
+  LogContainment();
+  GuLog("transaction result=%d containment=%#llx started=%u quiesced=%u fault=%u retained=%u maps=%u FLR=%u\n",
+    result, (unsigned long long)contained, Gu.started, Gu.quiesced, Gu.fault, Gu.retained, Gu.dma_count, Gu.flrs);
+  if (EFI_ERROR(contained) || !GuSafeToReturn() || Gu.allocations || (Gu.started && result)) Halt();
+  Gu.armed = FALSE;
+  status = result ? EFI_DEVICE_ERROR : EFI_SUCCESS;
  finish:
+  if (release_attempted && (EFI_ERROR(status) || Gu.fault)) ReleaseHalt(status, attempted);
   if (attempted && !GuSafeToReturn()) Halt();
   Gu.armed = FALSE;
-  if (GuLogReady()) GuLog("FINAL status=%#llx stage=%s attempted=%u clean=%u\n", (unsigned long long)status, Stage, attempted, GuSafeToReturn());
+  if (GuLogReady()) GuLog("FINAL status=%#llx stage=%s attempted=%u driver_release=%u clean=%u\n", (unsigned long long)status, Stage, attempted, (unsigned)release_attempted, GuSafeToReturn());
   else GuConsole("Preflight or logging failed; no new attempt will start.\n");
-  if (!GuLogReady()) { status = EFI_DEVICE_ERROR; if (Gu.started) Halt(); }
+  if (!GuLogReady()) { status = EFI_DEVICE_ERROR; if (release_attempted) ReleaseHalt(status, attempted); if (Gu.started) Halt(); }
   if (attempted && !GuSafeToReturn()) Halt();
   EFI_STATUS closed = GuIoClose();
-  if (EFI_ERROR(closed)) { if (Gu.started) Halt(); status = closed; }
+  if (EFI_ERROR(closed)) { if (release_attempted) ReleaseHalt(closed, attempted); if (Gu.started) Halt(); status = closed; }
   if (Gu.owned) {
     closed = Gu.bs->CloseProtocol(Gu.handle, &PciGuid, Image, NULL);
-    if (EFI_ERROR(closed)) { if (Gu.started) Halt(); status = closed; } else Gu.owned = FALSE;
+    if (EFI_ERROR(closed)) { if (release_attempted) ReleaseHalt(closed, attempted); if (Gu.started) Halt(); status = closed; } else Gu.owned = FALSE;
   }
   GuReleaseAssets();
-  if (!EFI_ERROR(status)) GuConsole("UEFI preflight completed. Returning to firmware.\n");
-  else GuConsole("Preflight stopped early. Returning without attempting anything.\n");
-  (void)ReleaseHalt; (void)turing_unlock_card; (void)turing_unlock_gfw_assess; (void)ConfigCheck; (void)Arm;
+  if (!EFI_ERROR(status)) GuConsole("UEFI transaction completed and cleaned up. Returning to firmware; Windows validation is pending.\n");
+  else GuConsole("Attempt cancelled or rejected. Returning without another attempt.\n");
   return status;
 }
