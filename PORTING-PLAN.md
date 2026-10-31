@@ -1,7 +1,42 @@
 # Porting plan: Turing (TU10x) unlock, Linux kernel module -> Windows UEFI
 
-Written 2026-10-31. Status: foundation laid, core transaction files not yet adapted or compiled. Nothing here has
-been tested against real hardware, and nothing here should be run against real hardware yet.
+Written 2026-10-31. Status: the vendor transaction code, the safety-gate layer, and the console/asset-loading layer
+are ported. The entry point (`app.c`) exists but most of its checks are explicit stubs - see "The two-stage
+architecture" below for why, which is the main thing this plan got more precise about since it was first written.
+Nothing here has been tested against real hardware, and nothing here should be run against real hardware yet.
+
+## The two-stage architecture (found while writing app.c, not anticipated at first)
+
+sargentmajord/Windows-GPU-UNLOCK is actually two separate programs, not one:
+
+1. **A read-only diagnostic/capture program** (`internal-boot/boot/` - `diagnostic.c`, `handoff.c`,
+   `prepare-console.c`) that reads and reports raw hardware state without assuming anything about the specific
+   machine. This is what a brand new machine runs first.
+2. **The actual unlock transaction** (`internal-boot/unlock/` - what this project has been porting) which needs a
+   complete, per-machine `profile.h` - chip id, PROM hash, cold-boot register values, display topology, console
+   driver fingerprints, even the exact PCI device path - before any of its checks mean anything. That profile is
+   generated (by `tools/profile_gen.py`, a host-side Python tool, not firmware) from stage 1's capture of one real,
+   specific machine. `profiles/z790-3060/profile.h` is Darron's own real machine, captured this way - there is no
+   universal "the right Ampere values" either, just one well-documented reference machine's real data.
+
+This project has only been porting stage 2. Stage 1 doesn't exist for Turing at all yet - `nlzy/turing-unlock`,
+being a Linux kernel module running on an already-booted system, never needed an equivalent: on Linux you can just
+read `/sys/bus/pci/devices/.../config` interactively, no pre-compiled per-machine constants required. A UEFI
+pre-boot program doesn't have that luxury.
+
+Concretely, this means `app.c`'s `BarCheck`/`PromCheck`/`ColdCheck`/`DisplayCheck` cannot be finished with real
+values by more research or more porting work alone - they need:
+1. A stage-1 capture program for Turing (doesn't exist yet - this is actual new work, not a port of anything,
+   though it can likely follow the shape of `internal-boot/boot/` closely).
+2. A `profile_gen.py`-equivalent to turn that capture's output into a real `profile.h`.
+3. A real machine: one of the exact validated (device, subsystem) identities from `port.h`'s `GuTargets` table,
+   in an actual PC, with whatever display/console adapter that PC actually has.
+4. Someone willing to run the stage-1 capture (read-only, makes no hardware changes) on that real machine.
+
+`machine-profile.h` and `profiles/TEMPLATE/profile.h` exist now specifically so the *shape* of what's needed is
+clear and reviewable - every field has a comment saying what it is and where it would come from - without
+pretending any of the placeholder values in it are real. It has a build-time `#error` specifically so it can never
+be mistaken for a real profile and compiled into working firmware.
 
 ## Why this looked more tractable once actually researched
 
