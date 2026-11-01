@@ -75,7 +75,10 @@ typedef struct {
   UINT16 saved_devctl, saved_devctl2;
   UINT8 pcie_version;
   BOOLEAN fault, retained, started, quiesced, armed, owned, display_ok, saved;
-  BOOLEAN profile_verified;
+  /* profile_verified is set by ColdCheck, prom_verified by PromCheck - both reset to
+   * FALSE at the start of their own check, same as the Ampere original's GU_PLATFORM
+   * (this field was missing here; added while porting PromCheck/ColdCheck for real). */
+  BOOLEAN profile_verified, prom_verified;
   /* Which row of GuTargets actually matched this card, set once by GuTargetConfig
    * and then checked by every later PCI-identity verification (GuSavePci, GuFlr,
    * GuEnableMaster, GuClearMaster) instead of a single compiled-in constant, since

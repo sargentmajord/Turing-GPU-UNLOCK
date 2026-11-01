@@ -1,15 +1,22 @@
 /* Turing GPU UNLOCK - Windows UEFI port. Adapted from
    sargentmajord/Windows-GPU-UNLOCK's internal-boot/unlock/app.c (GPL-2.0-only);
-   see THIRD_PARTY_NOTICES.md. Not compiled or tested yet - see PORTING-PLAN.md.
+   see THIRD_PARTY_NOTICES.md. Compiles clean (both build.ps1 modes) and has been
+   boot-tested only in the sense that the project's EFI build plumbing has been
+   verified end to end - never against real hardware. See PORTING-PLAN.md.
 
    IMPORTANT: this file is honest about what it can and cannot do yet. The safety
    functions (Halt, ReleaseHalt, LogContainment) are complete and need nothing
-   machine-specific. Everything that depends on a real machine profile
-   (ColdCheck, BarCheck, DisplayCheck, the full ConfigCheck) is a clearly marked
-   stub, not a guess dressed up as an implementation - see the long comment in
+   machine-specific. BarCheck, PromCheck and ColdCheck (2026-11-01) are real too -
+   their logic was always generic, parameterized by profile.h's own fields, not
+   dependent on any undiscovered Turing-specific hardware behavior. DisplayCheck
+   is the one still a clearly marked stub, not a guess dressed up as an
+   implementation - it genuinely needs this test machine's real console/display
+   topology, which no profile exists for yet. See the long comment in
    machine-profile.h and profiles/TEMPLATE/profile.h for exactly why, and
    PORTING-PLAN.md for the two-stage (capture, then unlock) architecture this
-   mirrors from the Ampere project. */
+   mirrors from the Ampere project. Against profiles/TEMPLATE (the only profile
+   that exists), BarCheck/PromCheck/ColdCheck will all correctly refuse rather
+   than pass, since every value they check is still a placeholder. */
 #include "app.h"
 #include "app_io.h"
 #include "compat/compat.h"
@@ -97,34 +104,106 @@ static EFI_STATUS FindTarget(VOID) {
   return status;
 }
 
-/* ---- Everything below needs a real machine profile and is not implemented yet.
- * Each one explains what it needs and points at the real Ampere equivalent to
- * port from once a real profiles/<name>/profile.h exists - see PORTING-PLAN.md. ---- */
+/* ---- BarCheck/PromCheck/ColdCheck: real now, not stubs - 2026-11-01. Each one's
+ * underlying logic was already generic (profile.h's own TEMPLATE comments said so
+ * for BarCheck/PromCheck specifically); ported from the Ampere app.c with only the
+ * register offsets and profile fields swapped to Turing's. DisplayCheck stays a
+ * stub below - unlike these three, it genuinely depends on this specific test
+ * machine's console/display topology, which no amount of porting work can supply
+ * without a real capture. Still built and run only against profiles/TEMPLATE
+ * (placeholders, #error-guarded) and a synthetic QEMU boot, same as everything
+ * else here - see PORTING-PLAN.md. */
 
-/* Needs: a capture-stage diagnostic program (internal-boot/boot/-equivalent) to
- * have already run on the real test machine, a profile_gen.py-equivalent to
- * have converted its output into a real profile.h, and this file built against
- * that profile instead of profiles/TEMPLATE. Port from app.c's BarCheck once
- * that exists - the logic itself (validate the BAR0 ACPI descriptor, confirm a
- * 16 MiB aperture) is not machine-specific, only GU_BAR0_BASE/GU_BAR0_END are. */
+/* TU_FEAT_PLM/SS0/SS1/READOUT are vendor/unlock.c's own private #defines (not
+ * exposed through any header) - restated here with the exact same literal values,
+ * cited back to their source, the same way probe.c already cites unlock.c's
+ * register list rather than pulling in the vendor file's internals. Two separate
+ * translation units, so no name collision; if unlock.c's values ever change,
+ * these must be updated to match by hand. */
+#define TU_FEAT_PLM 0x00409650u     /* vendor/unlock.c */
+#define TU_FEAT_SS0 0x00409664u     /* vendor/unlock.c */
+#define TU_FEAT_SS1 0x0040966cu     /* vendor/unlock.c */
+#define TU_FEAT_READOUT 0x00409668u /* vendor/unlock.c */
+
+/* Query BAR0 through the EDK2 PCI I/O protocol and confirm it is the 16 MiB memory
+ * aperture both GA10x and TU10x expose (profile.h's own comment on GU_BAR0_END).
+ * AddrRangeMax is accepted in either of its two valid readings - UEFI's own
+ * inclusive-end and pinned EDK2 PciBusDxe's alignment value - both describe the
+ * same aperture; this is a documented EDK2 implementation detail, not a guess
+ * about undiscovered Turing-specific behavior. */
 static EFI_STATUS BarCheck(VOID) {
-  GuLogText("BarCheck: not implemented - needs a real machine profile, see PORTING-PLAN.md.\n");
-  return EFI_UNSUPPORTED;
+  EFI_ACPI_ADDRESS_SPACE_DESCRIPTOR *r = NULL;
+  EFI_STATUS status = Gu.pci->GetBarAttributes(Gu.pci, 0, NULL, (VOID **)&r);
+  GuLog("bar0 query: status=%#llx\n", (unsigned long long)status);
+  if (!EFI_ERROR(status)) {
+    if (r && r->Desc == ACPI_ADDRESS_SPACE_DESCRIPTOR && r->Len == sizeof(*r) - 3)
+      GuLog("bar0 descriptor: type=%u granularity=%llu min=%#llx max=%#llx length=%#llx translation=%#llx\n",
+        (unsigned)r->ResType, (unsigned long long)r->AddrSpaceGranularity, (unsigned long long)r->AddrRangeMin,
+        (unsigned long long)r->AddrRangeMax, (unsigned long long)r->AddrLen, (unsigned long long)r->AddrTranslationOffset);
+    if (!r || r->Desc != ACPI_ADDRESS_SPACE_DESCRIPTOR || r->Len != sizeof(*r) - 3 || r->ResType != 0 ||
+      r->AddrRangeMin != GU_BAR0_BASE || r->AddrLen != 0x1000000 || r->AddrTranslationOffset ||
+      (r->AddrRangeMax != GU_BAR0_END && r->AddrRangeMax != 0x00ffffff) ||
+      r->AddrSpaceGranularity != 32 || ((UINT8 *)(r + 1))[0] != ACPI_END_TAG_DESCRIPTOR) status = EFI_UNSUPPORTED;
+    else {
+      UINT8 *raw = (UINT8 *)r, sum = 0;
+      for (UINTN i = 0; i < sizeof(*r) + 2; i++) sum = (UINT8)(sum + raw[i]);
+      if (raw[sizeof(*r) + 1] && sum) status = EFI_COMPROMISED_DATA;
+      else { Gu.bar_base = r->AddrRangeMin; Gu.bar_size = r->AddrLen; }
+    }
+  }
+  if (r) GuFree(r);
+  return status;
 }
-/* Needs the same real profile (GU_PROM_SHA256 is this exact card's own PROM
- * image hash, read once from a real capture). Port from app.c's PromCheck
- * unchanged once a real profile exists - the logic is generic. */
+/* GU_PROM_SHA256 is this exact card's own 1 MiB expansion-ROM hash, read once from
+ * a real capture - same read (BAR0+0x300000, 1 MiB) gsp_fwsec_frts() and probe.c's
+ * own PROM dump already use. Generic once Gu.bar_base is set, which only BarCheck
+ * sets - this must run after it. */
 static EFI_STATUS PromCheck(VOID) {
-  GuLogText("PromCheck: not implemented - needs a real machine profile, see PORTING-PLAN.md.\n");
-  return EFI_UNSUPPORTED;
+  Gu.prom_verified = FALSE;
+  Gu.profile_verified = FALSE;
+  VOID *prom = GuAlloc(1048576); if (!prom) return EFI_OUT_OF_RESOURCES;
+  GuCopyFromIo(prom, (VOID *)(UINTN)(Gu.bar_base + 0x300000), 1048576);
+  BOOLEAN good = !Gu.fault && GuHashMatches(prom, 1048576, GU_PROM_SHA256);
+  GuFree(prom); Gu.prom_verified = good; GuLog("live PROM hash matched=%u\n", (unsigned)good);
+  return good ? EFI_SUCCESS : EFI_CRC_ERROR;
 }
-/* Needs GU_CHIP_ID, GU_DEVICE_MEMORY_SIZE and the exact expected cold-boot GFW
- * register values from a real capture of a real, currently-locked, confirmed
- * card - none of which can be known without one. Port from app.c's ColdCheck
- * once that exists. */
+/* Chip id, device memory size and "has the firmware finished booting" are generic,
+ * profile-driven checks - turing_unlock_gfw_assess() already encapsulates exactly
+ * what "finished" means (PLM level-0, boot byte 0xff, CPUCTL halted) without this
+ * file needing to know Turing's own exact cold-boot register values, which nobody
+ * has captured yet. Deliberately NOT gating on an expected cold SS0/SS1 value the
+ * way Ampere's ColdCheck does (its GU_STOCK_PROFILE_SS0/GU_ENTRY_LATCHED machinery
+ * is itself the product of real-hardware research this project has none of yet -
+ * see PORTING-PLAN.md's note on not copying that speculatively). SS0/SS1 are only
+ * logged here for visibility; nothing is gated on their value until a real capture
+ * says what a genuinely cold Turing card's selectors actually read. */
 static EFI_STATUS ColdCheck(VOID) {
-  GuLogText("ColdCheck: not implemented - needs a real machine profile, see PORTING-PLAN.md.\n");
-  return EFI_UNSUPPORTED;
+  Gu.profile_verified = FALSE;
+  UINT32 chip = GuRead32(0);
+  struct turing_unlock_gfw_sample s = { .config_ok = true, .plm = GuRead32(GU_GFW_PLM_OFFSET),
+    .boot = GuRead32(GU_GFW_BOOT_OFFSET), .cpuctl = GuRead32(GU_GFW_CPUCTL_OFFSET) };
+  UINT32 wpr_hi = GuRead32(0x1fa828), ss0 = GuRead32(TU_FEAT_SS0), ss1 = GuRead32(TU_FEAT_SS1);
+  UINT32 memory = GuRead32(0x1183a4);
+  GuLog("cold state: chip=%#x boot_state=%#x gfw=%#x/%#x/%#x WPR2_HI=%#x SS0=%#x SS1=%#x memory=%#x\n",
+    chip, GuRead32(0x1180f8), s.plm, s.boot, s.cpuctl, wpr_hi, ss0, ss1, memory);
+#if !defined(GU_EXPERIMENTAL_UNLOCK)
+  GuLog("DIAGNOSTIC PREFLIGHT ONLY: chip baseline=UNKNOWN memory=%#x expected=%#x; cannot arm; no GPU writes/reset/DMA/driver release\n", memory, GU_DEVICE_MEMORY_SIZE);
+  return Gu.fault ? EFI_DEVICE_ERROR : EFI_NOT_READY;
+#else
+  GuLog("cold expected: profile=%s chip=%#x memory=%#x\n", GU_PROFILE_NAME, GU_CHIP_ID, GU_DEVICE_MEMORY_SIZE);
+  if (Gu.fault) return EFI_DEVICE_ERROR;
+  /* The same "reset required?" condition unlock.c's own entry point checks before
+   * ever starting a transaction (wpr_hi>>4 nonzero, or boot_state's top 12 bits
+   * set) - checked again here as a second, independent layer before arming, not
+   * because unlock.c's own check is trusted any less. */
+  if (chip != GU_CHIP_ID || memory != GU_DEVICE_MEMORY_SIZE || turing_unlock_gfw_assess(&s) ||
+    (wpr_hi >> 4) || !Gu.prom_verified)
+    return EFI_NOT_READY;
+  Gu.profile_verified = TRUE;
+  GuLog("EXPERIMENTAL exact-card profile %s verified; SS0=%#x SS1=%#x observed, not gated on - no real cold-state capture exists yet; hardware untested.\n",
+    GU_PROFILE_NAME, ss0, ss1);
+  return EFI_SUCCESS;
+#endif
 }
 /* Needs the real console/display topology (which GPU, if any, drives the
  * display; its PCI path) from a real capture - this varies per test machine and

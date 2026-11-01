@@ -1,16 +1,20 @@
 # Porting plan: Turing (TU10x) unlock, Linux kernel module -> Windows UEFI
 
 Written 2026-10-31. Status: the vendor transaction code, the safety-gate layer, and the console/asset-loading layer
-are ported. The entry point (`app.c`) exists but most of its checks are explicit stubs - see "The two-stage
-architecture" below for why, which is the main thing this plan got more precise about since it was first written.
-As of the same day, the build itself has actually been exercised for the first time: both `build.ps1` modes
-compile and link to a valid EFI binary against a disposable scratch profile, and a synthetic-fixture register-
-level test (`tests/test_transaction.c`) proves `unlock.c` is internally self-consistent - see item 3 under "What's
-genuinely still ahead" for everything that was found and fixed to get there. A stage-1 read-only hardware-capture
-tool (`internal-boot/boot/`) also exists now and has been boot-tested in an emulator (QEMU/OVMF, no real GPU
-present) - see "The two-stage architecture" below. **That read-only capture tool is the only thing it's safe to
-ask anyone to actually run on real hardware right now.** The unlock transaction itself has still never been
-tested against real hardware, and nothing in `internal-boot/unlock/` should be run against real hardware yet.
+are ported. The entry point (`app.c`) exists; as of 2026-11-01 three of its four machine-dependent checks
+(`BarCheck`, `PromCheck`, `ColdCheck`) are real, generic, profile-driven implementations rather than stubs -
+`DisplayCheck` remains the one genuine stub, since it needs this specific test machine's real console/display
+topology, which nothing but a real capture can supply. See "The two-stage architecture" below for the full story.
+
+The build itself has actually been exercised too: both `build.ps1` modes compile and link to a valid EFI binary
+against a disposable scratch profile (including after the BarCheck/PromCheck/ColdCheck work, rebuilt and
+reverified), and a synthetic-fixture register-level test (`tests/test_transaction.c`) proves `unlock.c` is
+internally self-consistent - see item 3 under "What's genuinely still ahead" for everything that was found and
+fixed to get there. A stage-1 read-only hardware-capture tool (`internal-boot/boot/`) also exists now and has
+been boot-tested in an emulator (QEMU/OVMF, no real GPU present) - see "The two-stage architecture" below.
+**That read-only capture tool is the only thing it's safe to ask anyone to actually run on real hardware right
+now.** The unlock transaction itself has still never been tested against real hardware, and nothing in
+`internal-boot/unlock/` should be run against real hardware yet.
 
 ## The two-stage architecture (found while writing app.c, not anticipated at first)
 
@@ -32,8 +36,19 @@ running on an already-booted system, never needed an equivalent to stage 1 at al
 `/sys/bus/pci/devices/.../config` interactively, no pre-compiled per-machine constants required. A UEFI pre-boot
 program doesn't have that luxury.
 
-Concretely, this means `app.c`'s `BarCheck`/`PromCheck`/`ColdCheck`/`DisplayCheck` cannot be finished with real
-values by more research or more porting work alone - they need:
+Concretely, this means `app.c`'s `BarCheck`/`PromCheck`/`ColdCheck`/`DisplayCheck` *used to* need real captured
+values before any of them could even be written, full stop. That turned out to be only half true: **checked
+directly, 2026-11-01** - `BarCheck` and `PromCheck`'s own TEMPLATE-profile comments already said their logic is
+generic (only `GU_BAR0_BASE`/`GU_BAR0_END`/`GU_PROM_SHA256` are machine-specific), and `ColdCheck`'s core question
+("has the firmware finished booting") is already fully answered by `turing_unlock_gfw_assess()` without needing
+any Turing-specific cold-register literal. All three are now real, ported from the Ampere `app.c` with the
+register offsets and profile fields swapped to Turing's (`TU_FEAT_PLM/SS0/SS1/READOUT` restated locally in `app.c`
+with a citation, since they're `vendor/unlock.c`'s own private `#define`s, not exposed through any header -
+found in the process that `port.h`'s `GU_PLATFORM` struct was missing the `prom_verified` field Ampere's has,
+fixed there too). Deliberately NOT ported: Ampere's `GU_STOCK_PROFILE_SS0`/`GU_ENTRY_LATCHED` machinery for
+gating on an expected cold SS0/SS1 value - that's itself the product of real-hardware research this project has
+none of yet, so `ColdCheck` only logs SS0/SS1 for visibility and gates on nothing until a real capture says what
+they should read. `DisplayCheck` alone still needs:
 1. **A stage-1 capture program for Turing - done, 2026-10-31, a first version.** `internal-boot/boot/` now exists:
    `diagnostic.c`/`diagnostic.h` ported from Ampere's almost unchanged (fully generic UEFI enumeration), `probe.c`/
    `probe.h` adapted to match any PCI device against `port.h`'s own `GuTargets` identities instead of a
