@@ -32,7 +32,10 @@
  * (port.c) accepts only an exact match against one of these rows, nothing else -
  * including a standard, unmodified 2080 Ti, even if someone can get one to boot
  * this far. If that is the card you actually have, this project does not (yet)
- * consider it validated, on purpose. */
+ * consider it validated here, on purpose - that is a statement about this
+ * project's one upstream source, not a claim that a stock card can't work at
+ * all; see PORTING-PLAN.md's "Known validation gap" for a different tool with
+ * its own stock-card reports. */
 #define GU_TARGET_COUNT 3
 typedef struct { UINT32 Device, Subsystem; const char *Source; } GU_TARGET;
 static const GU_TARGET GuTargets[GU_TARGET_COUNT] = {

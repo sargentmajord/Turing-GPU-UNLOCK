@@ -17,7 +17,8 @@ is not done, and why.
 - Used in: `internal-boot/unlock/vendor/` (`unlock.c`, `boot.c`, `layout.c`, `prep.c`, `vbios.c`, `gfw_eval.c`, and their
   headers), as a Turing port of Zagitta/gpu-unlock. Community-confirmed, per its own issue tracker (issues #1, #2, #22,
   #25), on several third-party VRAM-modified "22GB" RTX 2080 Ti cards (TU102, device IDs `10de:1e07` and `10de:1e04`) -
-  never a stock retail card. `main.c` is kept for provenance but is not ported - its role (Linux PCI driver
+  never a stock retail card in that tracker specifically (see PORTING-PLAN.md's "Known validation gap" - a
+  different tool has its own stock-card reports elsewhere). `main.c` is kept for provenance but is not ported - its role (Linux PCI driver
   registration, async probe, module init) has no UEFI equivalent and is replaced by this project's own single-shot
   entry point, the same way the Ampere port replaces Zagitta's equivalent file.
 - Changes made in this project so far: `gfw_eval.c` gained the same `0xbadf`-error-value rejection Ampere's port

@@ -289,6 +289,19 @@ for no safety benefit and goes beyond what Ampere's own pattern does (Ampere onl
 hand-written loop, not to a shared primitive). Closing this properly needs either a second poll variant or a
 hand-unrolled loop at that one call site, not a blanket change to `poll()`.
 
+**Known gap, not yet closed (flagged by a third party, not yet checked against real hardware):**
+`GuDmaAllocate` (`port.c`) allocates staging buffers with `AllocateAnyPages` - no minimum-address constraint, so
+the firmware is free to (and routinely does) hand back memory below 4 GiB. physicsdolphin, replying on
+github.com/nlzy/turing-unlock issue #26, reported that their own UEFI unlocker
+([nv-uefi-unlocker](https://github.com/physicsdolphin/nv-uefi-unlocker)) saw the booter reject staging reads
+below 4 GiB outright (mailbox halt `0x91`), and that deterministic >4 GiB allocation (`GetMemoryMap` +
+`AllocateAddress`) was the fix on their side. Whether that's a hardware/microcode constraint shared by
+nlzy/turing-unlock's own mechanism (which this project ports) or specific to their different booter
+implementation is not established - this project has no real Turing hardware to test either way. Recorded here
+rather than guessed at: if/when the unlock transaction is ever actually run, an `AllocateAddress` request above
+`0x100000000` for `GuDmaAllocate`'s buffer (falling back to `AllocateAnyPages` only if that's refused, and
+noting which path was used in the log) is the natural place to check this first.
+
 ## The register/layout differences (from turing-unlock's own docs, TU102 vs the two Ampere variants)
 
 | Item | TU102 | GA100 | GA102 |
@@ -347,12 +360,25 @@ not a guess):
 | #22 (both cards) | `10de:1e07` | `10de:12fa` | "modified-memory cards" (dual-card/NVLink) |
 | #25 | `10de:1e04` | not given | stock/modified not stated |
 
-Every report that says anything about it describes a third-party VRAM-modified "22GB" card - never a stock retail
-2080 Ti (which ships with 11 GB). The subsystem IDs differ between individual reporters even at the same device
-ID (`1e07` shows both `12fa` and `12a4`), so there is no single clean "the reference card" the way Ampere has one
-- these are a handful of different modded boards, not one well-documented machine. `port.h`'s `GuTargets` table
-is an exact allow-list of the rows above that have both a device and a subsystem id; a standard, unmodified 2080
-Ti - which is most likely what anyone offering to test this actually has - will not match any of them, on
-purpose. A UEFI port being correct does not establish that the underlying unlock sequence is safe on a card
-outside this table; that's a separate, larger gap than "has this been ported to Windows yet," and it is the
-reason this project does not consider a standard 2080 Ti validated at all right now.
+Every report that says anything about it, in nlzy/turing-unlock's own issue tracker specifically, describes a
+third-party VRAM-modified "22GB" card - never a stock retail 2080 Ti (which ships with 11 GB). The subsystem IDs
+differ between individual reporters even at the same device ID (`1e07` shows both `12fa` and `12a4`), so there is
+no single clean "the reference card" the way Ampere has one - these are a handful of different modded boards,
+not one well-documented machine. `port.h`'s `GuTargets` table is an exact allow-list of the rows above that have
+both a device and a subsystem id; a standard, unmodified 2080 Ti will not match any of them, on purpose. A UEFI
+port being correct does not establish that the underlying unlock sequence is safe on a card outside this table;
+that's a separate, larger gap than "has this been ported to Windows yet," and it is the reason this project does
+not consider a standard 2080 Ti validated here, right now.
+
+To be precise about what that does and doesn't mean: "never a stock retail 2080 Ti" above describes
+nlzy/turing-unlock's own issue tracker, not a fact about Turing hardware in general. physicsdolphin pointed out
+(github.com/nlzy/turing-unlock issue #26) that a different, more complete tool -
+[physicsdolphin/nv-uefi-unlocker](https://github.com/physicsdolphin/nv-uefi-unlocker) - has closed issues
+reporting successful unlocks on stock, unmodified cards: a factory 11 GB `10de:1e07` (issue #103), a stock RTX
+2080 Super `10de:1e81` (issue #14), and a stock RTX 2080 `10de:1e87` (issue #62). Those three issues are detailed
+and internally consistent (specific mailbox/register values, VBIOS checksums, hardware configs), so the claim
+itself looks credible. This project has not independently verified that tool or run anything from it, and is not
+adopting its (much broader, GTX16-RTX40) scope or its own `GuTargets`-equivalent list on the strength of someone
+else's issue tracker alone - but the narrower point stands: a stock 2080 Ti being unvalidated here is a gap in
+what *this port* (and the one upstream repo it's built from) has confirmed, not evidence that stock Turing cards
+can't work at all.

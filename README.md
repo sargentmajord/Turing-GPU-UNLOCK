@@ -33,12 +33,19 @@ open an issue. A standard retail 2080 Ti is also useful information even though 
 
 ## Known validation gap
 
-Every card `turing-unlock` has a community-confirmed report for (github.com/nlzy/turing-unlock issues #1, #2, #22,
-#25) is explicitly described by its own reporter as a third-party **VRAM-modified "22GB" card** - never a stock
-retail 2080 Ti. (An earlier version of this file said "Dell-made"; that was wrong and has been corrected - "Dell"
-appears nowhere in any of these reports.) A correct Windows port of the mechanism does not by itself make it safe
-on a standard, unmodified card, even one sharing the same PCI device ID. Read [PORTING-PLAN.md](PORTING-PLAN.md)
-before assuming otherwise.
+Every card `turing-unlock` has a community-confirmed report for, in **its own issue tracker specifically**
+(github.com/nlzy/turing-unlock issues #1, #2, #22, #25), is explicitly described by its own reporter as a
+third-party **VRAM-modified "22GB" card** - never a stock retail 2080 Ti. (An earlier version of this file said
+"Dell-made"; that was wrong and has been corrected - "Dell" appears nowhere in any of these reports.) A correct
+Windows port of the mechanism does not by itself make it safe on a standard, unmodified card, even one sharing
+the same PCI device ID. Read [PORTING-PLAN.md](PORTING-PLAN.md) before assuming otherwise.
+
+To be clear about what that gap is and isn't: it's a statement about what *this project's one upstream source*
+has confirmed, not a fact about Turing hardware in general. A different, more complete tool
+([physicsdolphin/nv-uefi-unlocker](https://github.com/physicsdolphin/nv-uefi-unlocker)) has its own closed issues
+reporting successful unlocks on stock, unmodified Turing cards - see PORTING-PLAN.md for the specifics. This
+project hasn't independently verified that tool and isn't adopting its scope; the point is only that a stock
+2080 Ti being unvalidated *here* isn't evidence it can't work at all.
 
 ## Credits
 
