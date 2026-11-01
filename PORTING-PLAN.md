@@ -23,8 +23,9 @@ sargentmajord/Windows-GPU-UNLOCK is actually two separate programs, not one:
    complete, per-machine `profile.h` - chip id, PROM hash, cold-boot register values, display topology, console
    driver fingerprints, even the exact PCI device path - before any of its checks mean anything. That profile is
    generated (by `tools/profile_gen.py`, a host-side Python tool, not firmware) from stage 1's capture of one real,
-   specific machine. `profiles/z790-3060/profile.h` is Darron's own real machine, captured this way - there is no
-   universal "the right Ampere values" either, just one well-documented reference machine's real data.
+   specific machine. `profiles/z790-3060/profile.h` is the Ampere project maintainer's own real machine, captured
+   this way - there is no universal "the right Ampere values" either, just one well-documented reference machine's
+   real data.
 
 This project had only ported stage 2 for most of its life. `nlzy/turing-unlock`, being a Linux kernel module
 running on an already-booted system, never needed an equivalent to stage 1 at all: on Linux you can just read
