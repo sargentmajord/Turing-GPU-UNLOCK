@@ -6,8 +6,11 @@ architecture" below for why, which is the main thing this plan got more precise 
 As of the same day, the build itself has actually been exercised for the first time: both `build.ps1` modes
 compile and link to a valid EFI binary against a disposable scratch profile, and a synthetic-fixture register-
 level test (`tests/test_transaction.c`) proves `unlock.c` is internally self-consistent - see item 3 under "What's
-genuinely still ahead" for everything that was found and fixed to get there. Nothing here has been tested against
-real hardware, and nothing here should be run against real hardware yet.
+genuinely still ahead" for everything that was found and fixed to get there. A stage-1 read-only hardware-capture
+tool (`internal-boot/boot/`) also exists now and has been boot-tested in an emulator (QEMU/OVMF, no real GPU
+present) - see "The two-stage architecture" below. **That read-only capture tool is the only thing it's safe to
+ask anyone to actually run on real hardware right now.** The unlock transaction itself has still never been
+tested against real hardware, and nothing in `internal-boot/unlock/` should be run against real hardware yet.
 
 ## The two-stage architecture (found while writing app.c, not anticipated at first)
 
@@ -23,19 +26,46 @@ sargentmajord/Windows-GPU-UNLOCK is actually two separate programs, not one:
    specific machine. `profiles/z790-3060/profile.h` is Darron's own real machine, captured this way - there is no
    universal "the right Ampere values" either, just one well-documented reference machine's real data.
 
-This project has only been porting stage 2. Stage 1 doesn't exist for Turing at all yet - `nlzy/turing-unlock`,
-being a Linux kernel module running on an already-booted system, never needed an equivalent: on Linux you can just
-read `/sys/bus/pci/devices/.../config` interactively, no pre-compiled per-machine constants required. A UEFI
-pre-boot program doesn't have that luxury.
+This project had only ported stage 2 for most of its life. `nlzy/turing-unlock`, being a Linux kernel module
+running on an already-booted system, never needed an equivalent to stage 1 at all: on Linux you can just read
+`/sys/bus/pci/devices/.../config` interactively, no pre-compiled per-machine constants required. A UEFI pre-boot
+program doesn't have that luxury.
 
 Concretely, this means `app.c`'s `BarCheck`/`PromCheck`/`ColdCheck`/`DisplayCheck` cannot be finished with real
 values by more research or more porting work alone - they need:
-1. A stage-1 capture program for Turing (doesn't exist yet - this is actual new work, not a port of anything,
-   though it can likely follow the shape of `internal-boot/boot/` closely).
-2. A `profile_gen.py`-equivalent to turn that capture's output into a real `profile.h`.
+1. **A stage-1 capture program for Turing - done, 2026-10-31, a first version.** `internal-boot/boot/` now exists:
+   `diagnostic.c`/`diagnostic.h` ported from Ampere's almost unchanged (fully generic UEFI enumeration), `probe.c`/
+   `probe.h` adapted to match any PCI device against `port.h`'s own `GuTargets` identities instead of a
+   single already-known ID (since this tool has to run *before* any profile.h exists - see probe.c's own header
+   comment), and `handoff.c` written from scratch, not a port: Ampere's `handoff.c` assumes an entire installer's
+   worth of infrastructure (a dedicated boot partition, firmware NVRAM registration, a Windows-partition
+   chainload) that doesn't exist for this project. Instead this one runs as a portable `\EFI\BOOT\BOOTX64.EFI` on
+   an ordinary FAT32 USB stick - the one boot path nearly all firmware scans automatically with no NVRAM
+   registration needed - writes its capture to that same USB stick, touches nothing else, and halts with no
+   attempt to chain-load Windows itself (see `THIRD_PARTY_NOTICES.md` for the exact provenance of each file).
+
+   Built with clang and actually boot-tested, not just compiled: installed QEMU + OVMF the same way LLVM was
+   installed (`ClaudeElevatedRunner`, since a plain `winget install` can't complete the elevation prompt from
+   this session), booted `BOOTX64.EFI` from a virtual FAT USB directory with no emulated GPU, and confirmed the
+   full real flow end to end - console messages, `probe-pci-handles=5`, `probe targets=0000` (correctly finding
+   no Turing GPU present), a complete capture log, firmware driver-image dumps, `capture-complete=1`, clean halt.
+   This caught a real bug no amount of reading would have: the directory-creation call passed `EFI_FILE_DIRECTORY`
+   (an *attribute* flag) as part of the *OpenMode* parameter instead of the Attributes parameter - an invalid
+   mode combination that silently failed, so every later file-create inside that directory failed too. Fixed and
+   reverified by rerunning the same boot test. (A subtler trap during this: a zombie QEMU process from the first,
+   buggy run kept its file locks held and kept serving stale console output on a later rerun, which looked for a
+   while like the fix hadn't worked at all - resolved by actually confirming the process list, not by guessing.)
+
+   Still only tested in an emulator with no real Turing card present - "probe targets=0000" is the *correct*
+   result there, not a confirmation that the probe logic works against a real card's actual register values.
+2. A `profile_gen.py`-equivalent to turn that capture's output into a real `profile.h` - not started.
 3. A real machine: one of the exact validated (device, subsystem) identities from `port.h`'s `GuTargets` table,
-   in an actual PC, with whatever display/console adapter that PC actually has.
-4. Someone willing to run the stage-1 capture (read-only, makes no hardware changes) on that real machine.
+   in an actual PC, with whatever display/console adapter that PC actually has. This project's own maintainer
+   does not have one.
+4. Someone willing to run the stage-1 capture (read-only, makes no hardware changes) on that real machine - this
+   is the ask now that item 1 exists: run the BOOTX64.EFI capture tool and share the resulting log, nothing more.
+   Running the actual unlock transaction is a separate, later, far higher-stakes step (see "Known validation gap"
+   below) and is explicitly not what's being asked for.
 
 `machine-profile.h` and `profiles/TEMPLATE/profile.h` exist now specifically so the *shape* of what's needed is
 clear and reviewable - every field has a comment saying what it is and where it would come from - without

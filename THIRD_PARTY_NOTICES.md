@@ -58,6 +58,25 @@ is not done, and why.
   machine-specific checks left as explicit, clearly-marked stubs rather than guessed at - see PORTING-PLAN.md for
   exactly what is and is not done.
 
+## The stage-1 read-only capture tool - sargentmajord/Windows-GPU-UNLOCK, GPL-2.0-only (partly new)
+
+- Source: [sargentmajord/Windows-GPU-UNLOCK](https://github.com/sargentmajord/Windows-GPU-UNLOCK)
+  `internal-boot/boot/{diagnostic.c,diagnostic.h,probe.c,probe.h}`, into the same-named files in
+  `internal-boot/boot/` here.
+- `diagnostic.h` and `diagnostic.c` are copied essentially unchanged - fully generic UEFI handle/protocol
+  enumeration, nothing chip-specific in either, apart from removing a `machine-profile.h`-gated exception
+  this tool can't depend on (see `diagnostic.c`'s own header comment for why).
+- `probe.h`/`probe.c` are adapted: Ampere's version filters for one already-known PCI vendor:device read
+  from an existing `profile.h`. This tool has no `profile.h` to read yet - that's the gap it exists to
+  help close - so it instead matches any PCI device against the two vendor:device identities sourced
+  from `port.h`'s own `GuTargets` table (`10de:1e07`, `10de:1e04`), and its BAR0 MMIO offset list is the
+  Turing register set (`unlock.c`/`gfw_eval.h`'s own offsets), not Ampere's GA10x one.
+- `internal-boot/boot/handoff.c` is new, not a port of Ampere's `handoff.c` - see that file's own header
+  comment for why (no installer/boot-partition infrastructure exists for this project yet, so this runs
+  as a portable `\EFI\BOOT\BOOTX64.EFI` on a USB stick instead, with no Windows chainload at all).
+  `build-diagnostic.ps1` is adapted from Ampere's own script of the same name, with the `-HardwareProfile`
+  parameter removed for the same reason `probe.c` has no profile.h dependency.
+
 ## EDK2 headers - BSD-2-Clause-Patent
 
 - Source: [TianoCore EDK2](https://github.com/tianocore/edk2), copied from the pinned commit already used in
