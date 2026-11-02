@@ -31,6 +31,12 @@ If you have a card matching one of the identities in [`internal-boot/unlock/port
 device ID `10de:1e07` or `10de:1e04`) and are willing to run the capture tool and share the resulting log, please
 open an issue. A standard retail 2080 Ti is also useful information even though it won't match the validated list.
 
+Along with the capture log, please also run [`tools/system-report.ps1`](tools/system-report.ps1) (read-only, no
+elevation required, changes nothing) and paste its output too: `powershell -ExecutionPolicy Bypass -File
+tools\system-report.ps1`. It prints your motherboard/BIOS, boot mode, and - most usefully - the exact PCI
+device-tree chain for each graphics adapter, which is normally only discoverable one slow round-trip at a time
+once something fails because of it.
+
 ## Known validation gap
 
 Every card `turing-unlock` has a community-confirmed report for, in **its own issue tracker specifically**
