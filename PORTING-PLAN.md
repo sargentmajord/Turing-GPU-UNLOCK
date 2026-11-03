@@ -50,6 +50,51 @@ table is for cards with an actual confirmed unlock, not a successful read.
   `GU_EXPERIMENTAL_UNLOCK` work actually starts: `ColdCheck` would benefit from the same `0xbadf`-prefix check
   `gfw_eval.c` already does, applied to this register too, rather than a bare equality compare.
 
+## `tools/profile_gen.py` - a first, deliberately scoped-down port (2026-11-03)
+
+Built against Cancretto's real capture (above) rather than guessed at. Deliberately smaller than
+sargentmajord/Windows-GPU-UNLOCK's own `profile_gen.py`, which this is adapted from: that tool also
+fingerprints a second ("console") adapter's firmware drivers, because the Ampere installer's architecture
+needs one. Nothing here does that - `DisplayCheck` is still a stub and nothing should guess at a
+two-adapter design for Turing that hasn't been built, let alone captured. This tool covers exactly what a
+build that actually compiles today needs, confirmed by compiling against its output, not assumed:
+
+- **A real, previously-unknown compile-time gap, found by actually building against generated output for
+  the first time:** `checks.c` (ported unchanged from Ampere, per THIRD_PARTY_NOTICES.md) compiles
+  *unconditionally* - only `app.c`'s *call* to `ConfigCheck` is gated behind `GU_EXPERIMENTAL_UNLOCK`, not
+  the function bodies in `checks.c`/`app.c` that reference `GU_BOARD_ID`/`GU_BOARD_SUBSYSTEM`/
+  `GU_CONFIG_CLASS_REV`/`GU_MSIX_CAP_*`/`GU_ROOT_PORT_*`/`GU_OTHER_GPU_*`. A profile that only supplied
+  `BarCheck`/`PromCheck`/`ColdCheck`'s own fields (the original, too-narrow scope of this tool's first
+  draft) failed to compile at all - `error: use of undeclared identifier 'GU_CONFIG_CLASS_REV'`. This was
+  never caught before because nothing had ever compiled against anything but the TEMPLATE profile (which
+  defines everything, just as placeholders) or no real profile at all.
+- Fixed by having the tool also emit `GU_BOARD_ID`/`GU_BOARD_SUBSYSTEM`/`GU_TARGET_BUS`/
+  `GU_CONFIG_CLASS_REV`/`GU_MSIX_CAP_OFFSET`/`GU_MSIX_CAP_DWORD`/`GU_ROOT_PORT_DEVICE`/
+  `GU_ROOT_PORT_FUNCTION` - all genuinely derivable from the target card's own single-adapter capture, no
+  second adapter needed. `GU_OTHER_GPU_ROOT_DEVICE`/`FUNCTION`/`ADR` *do* need a second adapter this tool
+  has no capture for; they're emitted as explicit, clearly-commented placeholders (`0`) instead - safe
+  because nothing reachable today ever evaluates them, only needs them to exist so `checks.c` compiles.
+- **A second real finding, also only caught by actually building:** the target card's own plain PCI device
+  path is `PciRoot(0)/Pci(a,b)/Pci(0,0)/END` - 4 nodes, **no `ADR` node**. This tool's first draft reused
+  Ampere's `classify_path()` (which requires a 5th `ADR` node) for this, because Ampere's own
+  `profile_gen.py` only ever uses that shape for a *GOP's* path, not a plain PCI handle's - a distinction
+  this project's first draft missed by not reading closely enough, and which refused every real capture
+  with a confusing `pci-path` finding until corrected. Added a separate `pci_device_path()` for the 4-node,
+  no-ADR shape, used only for the target's own path; `classify_path()` is kept for if/when a GOP path
+  (which does carry an `ADR` node) is ever needed again.
+- Verified end to end, not just unit-tested: with a synthetic capture (Cancretto's real registers/PROM
+  hash/device-path shape, with only the (device, subsystem) swapped to an actual `GuTargets` row and the
+  one known-bad memory register cleared - see `tools/test_profile_gen.py`'s own comment for exactly what
+  that does and doesn't change), the generated `profile.h` was used to build **both** `build.ps1` modes
+  (default and `-ExperimentalUnlock`) via `$env:CPATH`, and both produced a valid EFI binary - the first
+  time this project's unlock build has ever compiled against anything but the TEMPLATE profile.
+- `tools/test_profile_gen.py` (16/16) checks the real capture directly (clean, PROM hash matches
+  Cancretto's own independent computation, GFW registers check out, correctly refused for not being a
+  `GuTargets` card) and the synthetic accepted-card path (produces a complete, correctly-shaped profile),
+  plus one refusal test per check. Cancretto's capture (`tools/captures/run01-cancretto-2080ti-ftw3/`) is
+  checked into this repo, unlike sargentmajord/Windows-GPU-UNLOCK's own private reference captures: he
+  posted it publicly for this purpose and sanitized it himself first (see the GitHub issue).
+
 ## The two-stage architecture (found while writing app.c, not anticipated at first)
 
 sargentmajord/Windows-GPU-UNLOCK is actually two separate programs, not one:
