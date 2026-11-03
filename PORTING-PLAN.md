@@ -16,6 +16,40 @@ been boot-tested in an emulator (QEMU/OVMF, no real GPU present) - see "The two-
 now.** The unlock transaction itself has still never been tested against real hardware, and nothing in
 `internal-boot/unlock/` should be run against real hardware yet.
 
+## First real-hardware capture (2026-11-03, Cancretto, stock EVGA RTX 2080 Ti FTW3 11GB)
+
+The first real capture against actual Turing hardware, via GitHub issue
+[sargentmajord/Windows-GPU-UNLOCK#2](https://github.com/sargentmajord/Windows-GPU-UNLOCK/issues/2). Machine: ASUS
+Z390-E (Intel 9900K, no bridge/switch between the GPU and the CPU root complex - the card sits directly under a
+root port), BIOS modified with [NvStrapsReBar](https://github.com/terminatorul/NvStrapsReBar) for ReBAR, resizable
+BAR enabled, Secure Boot disabled. Card: `10de:1e07`, subsystem `1b4c:a016` (EVGA), physically unmodified 11 GB -
+does not match any `GuTargets` row and isn't being added to it on the strength of a clean capture alone; that
+table is for cards with an actual confirmed unlock, not a successful read.
+
+- **The capture itself is clean**: `capture-complete=1`, `diagnostic-result status=0x0`, no `incomplete reason=`
+  lines anywhere in the log, exactly one PCI target found (`probe targets=0001`), exactly one GOP (`gops=0001`).
+  First confirmation that `diagnostic.c`/`probe.c` actually work end to end on real firmware, not just in
+  QEMU/OVMF.
+- **Independently cross-checked**: the reporter computed `PROM.BIN`'s SHA-256 themselves before deciding not to
+  publish the file (correctly - see `probe.c`'s own comment on why), and it matches the hash the probe computed
+  from its own live MMIO read byte-for-byte (`281602497e3c...`). Two independent computations of the same 1 MB
+  read agreeing is about as good a sanity check on `ProbeBar`'s PROM-dump path as this project could ask for
+  without the file itself.
+- **`gfw_eval.c`'s porting checks out against real registers**: `GU_GFW_PLM_OFFSET`/`BOOT_OFFSET`/`CPUCTL_OFFSET`
+  (`0x118128`/`0x118234`/`0x110100`) read `0xffffff8f`/`0x000003ff`/`0x00000010` - none hit the `0xbadf`
+  rejection, and `cpuctl & GU_GFW_CPUCTL_HALTED` (`0x10`) is set, so `turing_unlock_gfw_assess()` would correctly
+  read this as a normal, fully-booted (halted) GFW state on a stock, never-unlocked card. First real evidence
+  this part of the port's register semantics are right, not just internally consistent with itself.
+- **New observation, not yet a bug to fix**: `app.c`'s `ColdCheck` reads a separate "memory size" register at
+  `0x1183a4` directly (not through `gfw_eval.c`'s sample struct, so not covered by its `0xbadf` rejection) and
+  compares it against a profile's `GU_DEVICE_MEMORY_SIZE`. On this real capture, at this point in a pre-driver
+  EFI boot, that register actually reads `0xbadf5040` - the same "not a finished value" sentinel `gfw_eval.c`
+  already knows to reject elsewhere, just not plumbed into this particular read. `GU_PREFLIGHT_ONLY` means
+  nothing acts on this today, and the existing exact-equality check would already correctly refuse rather than
+  misread it as a real size - so this isn't broken, just worth remembering precisely for whenever
+  `GU_EXPERIMENTAL_UNLOCK` work actually starts: `ColdCheck` would benefit from the same `0xbadf`-prefix check
+  `gfw_eval.c` already does, applied to this register too, rather than a bare equality compare.
+
 ## The two-stage architecture (found while writing app.c, not anticipated at first)
 
 sargentmajord/Windows-GPU-UNLOCK is actually two separate programs, not one:
