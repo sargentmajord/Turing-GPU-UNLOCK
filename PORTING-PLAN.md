@@ -360,13 +360,17 @@ pass, both checked directly against Ampere's already-ported `unlock_610.c` rathe
   `GuTargetConfig` already resolved) rather than a compile-time constant, since Turing's card identity is a
   runtime allow-list (`GuTargets`), not Ampere's single compile-time `GU_BOARD_ID`.
 
-**Known gap, not yet closed:** the GSP side's equivalent long wait (`gsp_fwsec_frts`'s `poll(w, GSP_BASE + 0x100,
-..., 5000000, true)`) does not get the same per-iteration identity recheck, because it goes through the shared
-generic `poll()` helper that's also used for many short, hot-path waits elsewhere in the file (e.g. the
-256-byte-chunk loop in `sec_dma`) - adding a PCI config-space read to every `poll()` call would slow those down
-for no safety benefit and goes beyond what Ampere's own pattern does (Ampere only added this to one specific
-hand-written loop, not to a shared primitive). Closing this properly needs either a second poll variant or a
-hand-unrolled loop at that one call site, not a blanket change to `poll()`.
+**Closed, 2026-11-04:** the GSP side's equivalent long wait (`gsp_fwsec_frts`'s `poll(w, GSP_BASE + 0x100,
+..., 5000000, true)`) did not get the same per-iteration identity recheck `sec_hs_fire`'s own hand-written loop
+already has, because it goes through the shared generic `poll()` helper that's also used for many short,
+hot-path waits elsewhere in the file (e.g. the 256-byte-chunk loop in `sec_dma`) - adding a PCI config-space
+read to every `poll()` call would slow those down for no safety benefit and goes beyond what Ampere's own
+pattern does (Ampere only added this to one specific hand-written loop, not to a shared primitive). Closed with
+a second function, `poll_watched()` (`vendor/unlock.c`, `#ifdef GU_UEFI_PORT` only) - identical to `poll()`
+except for the same live-identity reread `sec_hs_fire` already does per iteration - used only at
+`gsp_fwsec_frts`'s one call site via a `#ifdef GU_UEFI_PORT` branch; the non-UEFI Linux build path is untouched
+and still calls plain `poll()`. Compiled and linked clean in both build modes (preflight and
+`-ExperimentalUnlock`) against a throwaway profile.
 
 **Closed, 2026-11-04 (flagged by a third party, still not checked against real hardware - see the honesty note
 below).** `GuDmaAllocate` (`port.c`) used to allocate staging buffers with `Gu.pci->AllocateBuffer(...,

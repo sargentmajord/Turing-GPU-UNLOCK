@@ -142,6 +142,45 @@ static int poll(struct tu_work *w, u32 off, u32 mask, u32 expect, unsigned int u
 	}
 }
 
+#ifdef GU_UEFI_PORT
+/* Same shape as poll() above, with sec_hs_fire's own per-iteration live-identity
+ * recheck (mirroring sargentmajord/Windows-GPU-UNLOCK's falcon_hs() wait_plm loop)
+ * added for this one caller only - gsp_fwsec_frts's long (up to 5s) GSP wait, the
+ * one call site PORTING-PLAN.md's "unlock.c adaptation status" flagged as still
+ * missing it. Deliberately a separate function, not a change to poll() itself:
+ * poll() is also the shared primitive for many short, hot-path waits elsewhere in
+ * this file (e.g. sec_dma's 256-byte-chunk loop), where adding a PCI config-space
+ * read to every iteration would cost real time for no safety benefit - the same
+ * reasoning the existing gap note already gives for not changing poll() directly. */
+static int poll_watched(struct tu_work *w, u32 off, u32 mask, u32 expect, unsigned int us, bool fatal)
+{
+	ktime_t deadline = ktime_add_us(ktime_get(), us);
+
+	for (;;) {
+		u32 v;
+		u32 identity = ~0u;
+
+		if (pci_read_config_dword(w->pdev, PCI_VENDOR_ID, &identity) ||
+		    identity != Gu.target_device)
+			return GU_DIAG(-ENODEV);
+		v = rd(w, off);
+		if (bad(v))
+			return GU_DIAG(-EIO);
+		if ((v & mask) == expect)
+			return 0;
+		if (ktime_compare(ktime_get(), deadline) >= 0) {
+			if (!fatal) {
+				GU_NOTE("poll tolerated timeout: reg=%#x last=%#x want=%#x&%#x\n",
+					off, v, expect, mask);
+				return -ETIMEDOUT;
+			}
+			return GU_DIAG(-ETIMEDOUT);
+		}
+		usleep_range(50, 100);
+	}
+}
+#endif
+
 static int wait_gfw(struct tu_work *w)
 {
 	ktime_t deadline = ktime_add_us(ktime_get(), GU_GFW_TIMEOUT_US);
@@ -376,7 +415,11 @@ static int gsp_fwsec_frts(struct tu_work *w)
 		wr(w, GSP_BASE + 0x130, 1u << 1);
 	else
 		wr(w, GSP_BASE + 0x100, 1u << 1);
+#ifdef GU_UEFI_PORT
+	ret = poll_watched(w, GSP_BASE + 0x100, 1u << 4, 1u << 4, 5000000, true);
+#else
 	ret = poll(w, GSP_BASE + 0x100, 1u << 4, 1u << 4, 5000000, true);
+#endif
 	scratch = rd(w, 0x001400 + 0x0e * 4);
 	wpr_lo = rd(w, 0x1fa824);
 	wpr_hi = rd(w, 0x1fa828);
