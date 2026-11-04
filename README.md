@@ -53,6 +53,37 @@ reporting successful unlocks on stock, unmodified Turing cards - see PORTING-PLA
 project hasn't independently verified that tool and isn't adopting its scope; the point is only that a stock
 2080 Ti being unvalidated *here* isn't evidence it can't work at all.
 
+### What real-world reports actually show about the risk (2026-11-04)
+
+If you're reading this because you're considering being an early real-hardware tester of the actual unlock
+transaction (not the read-only capture, which is already safe and described above), here's the honest picture
+from reading every comment on every relevant public report, not just skimming titles:
+
+- **No report, anywhere, of this mechanism damaging a card.** Across the Turing success report cited above
+  ([physicsdolphin/nv-uefi-unlocker#103](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/103) - a
+  factory-stock, unmodified 11GB TU102 2080 Ti, unlocked, reapplied via an auto-replay loader on every boot, with
+  the reporter explicitly confirming consistent results across multiple reboots) and several detailed Ampere
+  reports on the same underlying mechanism
+  ([#135](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/135),
+  [#126](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/126),
+  [#148](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/148),
+  [#164](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/164)), the worst outcome ever reported is that
+  the unlock **doesn't take, or quietly reverts to stock values** - never a hang, crash, or anything requiring
+  more than a normal restart. One open issue that looked like a counter-example at first read
+  ([#112](https://github.com/physicsdolphin/nv-uefi-unlocker/issues/112)) turned out, on reading the full thread
+  rather than the title, to most likely never have run the actual unlock transaction at all - the reporter hadn't
+  gotten past an earlier prerequisite step.
+- **Whether it "takes" or relocks depends on platform power behavior, not luck.** Real, root-caused examples
+  include GC6/D3cold wake transitions, root-port ACPI `_PR3`/`_OFF` power-rail cuts, and driver re-initialization
+  on bind - all well-understood, all result in a clean revert to stock, never a bad state.
+- **What none of this proves:** that *this specific project's code* works on *any* real Turing card. Every report
+  above is from a different, separately-developed, far more iterated tool
+  (physicsdolphin/nv-uefi-unlocker, eleven-plus bugfix releases from real-world testing). This project's own code
+  has never been run against real hardware at all, by anyone. The realistic expectation for a first real test
+  here is that it might just work, or it might need a round of log-based iteration first (a timing race, a
+  staging-allocation quirk, etc. - exactly the kind of thing every report above shows happening to someone, and
+  getting fixed) - not that it's likely to harm the card either way.
+
 ## Credits
 
 Built on the work of `nlzy` (`turing-unlock`), `Zagitta` (`gpu-unlock`), and `impacifist`/`sargentmajord`
