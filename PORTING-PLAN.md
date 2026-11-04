@@ -368,18 +368,35 @@ for no safety benefit and goes beyond what Ampere's own pattern does (Ampere onl
 hand-written loop, not to a shared primitive). Closing this properly needs either a second poll variant or a
 hand-unrolled loop at that one call site, not a blanket change to `poll()`.
 
-**Known gap, not yet closed (flagged by a third party, not yet checked against real hardware):**
-`GuDmaAllocate` (`port.c`) allocates staging buffers with `AllocateAnyPages` - no minimum-address constraint, so
-the firmware is free to (and routinely does) hand back memory below 4 GiB. physicsdolphin, replying on
-github.com/nlzy/turing-unlock issue #26, reported that their own UEFI unlocker
-([nv-uefi-unlocker](https://github.com/physicsdolphin/nv-uefi-unlocker)) saw the booter reject staging reads
-below 4 GiB outright (mailbox halt `0x91`), and that deterministic >4 GiB allocation (`GetMemoryMap` +
-`AllocateAddress`) was the fix on their side. Whether that's a hardware/microcode constraint shared by
-nlzy/turing-unlock's own mechanism (which this project ports) or specific to their different booter
-implementation is not established - this project has no real Turing hardware to test either way. Recorded here
-rather than guessed at: if/when the unlock transaction is ever actually run, an `AllocateAddress` request above
-`0x100000000` for `GuDmaAllocate`'s buffer (falling back to `AllocateAnyPages` only if that's refused, and
-noting which path was used in the log) is the natural place to check this first.
+**Closed, 2026-11-04 (flagged by a third party, still not checked against real hardware - see the honesty note
+below).** `GuDmaAllocate` (`port.c`) used to allocate staging buffers with `Gu.pci->AllocateBuffer(...,
+AllocateAnyPages, ...)` only - no minimum-address constraint, so the firmware was free to (and routinely does)
+hand back memory below 4 GiB. physicsdolphin, replying on github.com/nlzy/turing-unlock issue #26, reported that
+their own UEFI unlocker ([nv-uefi-unlocker](https://github.com/physicsdolphin/nv-uefi-unlocker)) saw the booter
+reject staging reads below 4 GiB outright (mailbox halt `0x91`), and that deterministic >4 GiB allocation
+(`GetMemoryMap` + `AllocateAddress`) was the fix on their side.
+
+Checked directly before implementing, not assumed: `EFI_PCI_IO_PROTOCOL.AllocateBuffer`'s own `Type` parameter is
+documented in the vendored `deps/edk2/MdePkg/Include/Protocol/PciIo.h` as "not used and must be ignored" - so
+there was never a way to request this through the call `GuDmaAllocate` already used, confirming physicsdolphin's
+fix really did require bypassing it for raw `EFI_BOOT_SERVICES.AllocatePages`.
+
+Added `GuDmaAllocateHigh()`: scans the UEFI memory map for a free `EfiConventionalMemory` region with enough room
+above `0x100000000`, and if found, allocates there via `AllocatePages(AllocateAddress, ...)` instead. If no
+region is found, or the specific address is refused, `GuDmaAllocate` falls back to exactly the original
+`Gu.pci->AllocateBuffer(AllocateAnyPages, ...)` path - unchanged, still the one Ampere's own validated port uses.
+Both paths funnel into the same `Gu.pci->Map()` call afterward (which, per spec, works on any host buffer, not
+just ones from `AllocateBuffer`), and `GU_DMA` gained a `via_pages` flag so `GuDmaFree` calls the matching
+`Gu.bs->FreePages`/`Gu.pci->FreeBuffer` rather than guessing - EDK2 does not guarantee these two allocators share
+a free list. Compiled and linked clean (`-ExperimentalUnlock` build) against a throwaway profile.
+
+**Honesty note, since this is exactly the kind of thing to not overstate:** this is a safe, strictly
+try-first/fall-back-to-the-already-validated-path addition - it cannot make a working configuration stop
+working, since the fallback is the unchanged Ampere-validated behavior. It is NOT a confirmation that Turing
+needs this fix, or that it solves the `0x91` mailbox halt physicsdolphin saw - that remains unestablished for
+nlzy/turing-unlock's own mechanism specifically, since this project still has no real Turing hardware to test
+against. "Closed" here means the code path now exists and compiles, not that the underlying hardware question is
+answered.
 
 ## The register/layout differences (from turing-unlock's own docs, TU102 vs the two Ampere variants)
 

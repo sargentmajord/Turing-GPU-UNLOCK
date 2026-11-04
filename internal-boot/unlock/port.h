@@ -67,6 +67,15 @@ struct GU_DMA {
   UINT64 dma;
   UINTN bytes, pages;
   BOOLEAN mapped;
+  /* TRUE if cpu came from GuDmaAllocateHigh's raw Gu.bs->AllocatePages(AllocateAddress,
+   * ...) above 4 GiB, FALSE if from the normal Gu.pci->AllocateBuffer(AllocateAnyPages,
+   * ...) path - GuDmaFree must call the matching Gu.bs->FreePages/Gu.pci->FreeBuffer, not
+   * whichever one is convenient, since EDK2 does not guarantee these two allocators share
+   * a free list. See PORTING-PLAN.md's "unlock.c adaptation status" for why the >4 GiB
+   * preference exists at all (physicsdolphin's reported mailbox 0x91 on sub-4 GiB staging
+   * reads) and why it is a safe try-first/fall-back-to-the-Ampere-validated-path addition,
+   * not a speculative port of unconfirmed Turing-specific behavior. */
+  BOOLEAN via_pages;
 };
 typedef struct {
   EFI_BOOT_SERVICES *bs;

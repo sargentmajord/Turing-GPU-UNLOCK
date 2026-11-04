@@ -48,16 +48,66 @@ VOID GuFree(VOID *Memory) {
 }
 VOID GuStarted(VOID) { Gu.started = TRUE; Gu.quiesced = FALSE; }
 VOID GuQuiesced(VOID) { if (!Gu.fault) Gu.quiesced = TRUE; }
+#define GU_4GIB 0x100000000ULL
+/* Try to place a DMA staging buffer entirely above 4 GiB, since EFI_PCI_IO_PROTOCOL's
+ * own AllocateBuffer cannot do this - its Type parameter "is not used and must be
+ * ignored" per the UEFI spec (checked directly against the vendored
+ * deps/edk2/MdePkg/Include/Protocol/PciIo.h, not assumed), so the only way to request
+ * an address-constrained page range at all is raw Gu.bs->AllocatePages(AllocateAddress,
+ * ...), which needs a real free physical address found by scanning the memory map
+ * first - there is no "AllocateMinAddress" type. Failure here (no suitable region, or
+ * the firmware refuses the specific address) is not logged as an error and is not
+ * fatal to the caller: GuDmaAllocate falls back to the existing, Ampere-validated
+ * AllocateAnyPages path exactly as before. This function only ever returns a page
+ * range or nothing; it never partially commits state the caller would need to unwind. */
+static EFI_STATUS GuDmaAllocateHigh(UINTN Pages, VOID **Cpu) {
+  UINTN MapSize = 0, Key, DescSize, Count, I; UINT32 Ver;
+  EFI_MEMORY_DESCRIPTOR *Map; EFI_STATUS Status;
+  EFI_PHYSICAL_ADDRESS Need = (UINT64)Pages << 12, Candidate;
+  *Cpu = NULL;
+  Status = Gu.bs->GetMemoryMap(&MapSize, NULL, &Key, &DescSize, &Ver);
+  if (Status != EFI_BUFFER_TOO_SMALL || !MapSize || !DescSize) return EFI_NOT_FOUND;
+  MapSize += 8 * DescSize; /* slack: the map can grow between the sizing call and the real one */
+  Map = GuAlloc(MapSize); if (!Map) return EFI_OUT_OF_RESOURCES;
+  Status = Gu.bs->GetMemoryMap(&MapSize, Map, &Key, &DescSize, &Ver);
+  if (EFI_ERROR(Status) || !DescSize) { GuFree(Map); return EFI_NOT_FOUND; }
+  Count = MapSize / DescSize;
+  for (I = 0; I < Count; I++) {
+    EFI_MEMORY_DESCRIPTOR *D = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + I * DescSize);
+    EFI_PHYSICAL_ADDRESS RegionEnd;
+    if (D->Type != EfiConventionalMemory || !D->NumberOfPages) continue;
+    if (D->NumberOfPages > (0xffffffffffffffffULL >> 12)) continue; /* NumberOfPages<<12 overflow guard */
+    RegionEnd = D->PhysicalStart + (D->NumberOfPages << 12);
+    if (RegionEnd <= D->PhysicalStart) continue; /* RegionEnd wrapped - malformed descriptor, skip */
+    if (RegionEnd <= GU_4GIB) continue; /* whole region is below 4 GiB, not what we want */
+    Candidate = D->PhysicalStart >= GU_4GIB ? D->PhysicalStart : GU_4GIB;
+    if (RegionEnd - Candidate < Need) continue; /* not enough room above the 4 GiB line in this region */
+    Status = Gu.bs->AllocatePages(AllocateAddress, EfiBootServicesData, Pages, &Candidate);
+    if (!EFI_ERROR(Status)) { GuFree(Map); *Cpu = (VOID *)(UINTN)Candidate; return EFI_SUCCESS; }
+    /* This specific region didn't pan out (another allocator raced us, or the
+     * descriptor was stale) - keep scanning the rest of the map, don't give up yet. */
+  }
+  GuFree(Map); return EFI_NOT_FOUND;
+}
 EFI_STATUS GuDmaAllocate(UINTN N, VOID **C, UINT64 *D) {
-  EFI_STATUS Status; GU_DMA *Entry; UINTN Mapped;
+  EFI_STATUS Status; GU_DMA *Entry; UINTN Mapped; BOOLEAN ViaPages = FALSE;
   if (!C || !D) return EFI_INVALID_PARAMETER;
   *C = NULL; *D = 0;
   if (GU_PREFLIGHT_ONLY || !Gu.profile_verified || !Gu.armed || !Gu.display_ok || !N || N > (128U << 20) || Gu.fault || Gu.retained || !Gu.pci || !Gu.owned) return EFI_INVALID_PARAMETER;
   Entry = GuAlloc(sizeof(*Entry)); if (!Entry) return EFI_OUT_OF_RESOURCES;
   Entry->pages = (N + 4095) / 4096; Entry->bytes = Entry->pages * 4096;
-  Status = Gu.pci->AllocateBuffer(Gu.pci, AllocateAnyPages, EfiBootServicesData,
-    Entry->pages, &Entry->cpu, 0);
+  Status = GuDmaAllocateHigh(Entry->pages, &Entry->cpu);
+  if (!EFI_ERROR(Status) && Entry->cpu) {
+    ViaPages = TRUE;
+    GuLog("DMA staging buffer placed above 4GiB: addr=%#llx pages=%zu\n",
+      (unsigned long long)(UINTN)Entry->cpu, (size_t)Entry->pages);
+  } else {
+    GuLog("DMA staging buffer: no usable >4GiB region found, using the default allocator\n");
+    Status = Gu.pci->AllocateBuffer(Gu.pci, AllocateAnyPages, EfiBootServicesData,
+      Entry->pages, &Entry->cpu, 0);
+  }
   if (EFI_ERROR(Status) || !Entry->cpu) { GuFree(Entry); return EFI_ERROR(Status) ? Status : EFI_OUT_OF_RESOURCES; }
+  Entry->via_pages = ViaPages;
   memset(Entry->cpu, 0, Entry->bytes); Mapped = Entry->bytes;
   Status = Gu.pci->Map(Gu.pci, EfiPciIoOperationBusMasterCommonBuffer, Entry->cpu,
     &Mapped, &Entry->dma, &Entry->mapping);
@@ -68,7 +118,8 @@ EFI_STATUS GuDmaAllocate(UINTN N, VOID **C, UINT64 *D) {
     if (Entry->mapped && EFI_ERROR(Gu.pci->Unmap(Gu.pci, Entry->mapping))) {
       Entry->next = Gu.allocations; Gu.allocations = Entry; Gu.retained = TRUE; return Status;
     }
-    if (EFI_ERROR(Gu.pci->FreeBuffer(Gu.pci, Entry->pages, Entry->cpu))) {
+    if (EFI_ERROR(ViaPages ? Gu.bs->FreePages((EFI_PHYSICAL_ADDRESS)(UINTN)Entry->cpu, Entry->pages)
+                           : Gu.pci->FreeBuffer(Gu.pci, Entry->pages, Entry->cpu))) {
       Entry->mapped = FALSE; Entry->next = Gu.allocations; Gu.allocations = Entry; Gu.retained = TRUE; return Status;
     }
     GuFree(Entry); return Status;
@@ -91,7 +142,8 @@ EFI_STATUS GuDmaFree(VOID *C, UINT64 D) {
     if (EFI_ERROR(Status)) { Gu.retained = TRUE; return Status; }
     Entry->mapped = FALSE;
   }
-  Status = Gu.pci->FreeBuffer(Gu.pci, Entry->pages, Entry->cpu);
+  Status = Entry->via_pages ? Gu.bs->FreePages((EFI_PHYSICAL_ADDRESS)(UINTN)Entry->cpu, Entry->pages)
+                             : Gu.pci->FreeBuffer(Gu.pci, Entry->pages, Entry->cpu);
   if (EFI_ERROR(Status)) { Gu.retained = TRUE; return Status; }
   *Link = Entry->next; GuFree(Entry); if (Gu.dma_count) Gu.dma_count--; return EFI_SUCCESS;
 }
