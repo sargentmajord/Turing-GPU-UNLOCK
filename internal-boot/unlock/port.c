@@ -20,9 +20,12 @@ BOOLEAN GuTargetConfig(const UINT32 *C, UINTN S, UINTN B, UINTN D, UINTN F) {
    * is not even a graphics card. */
   if (!C || S || B != 1 || D || F || (C[2] >> 24) != 3 || ((C[3] >> 16) & 0x7f)) return FALSE;
   for (I = 0; I < GU_TARGET_COUNT; I++) {
-    if (C[0] == GuTargets[I].Device && C[11] == GuTargets[I].Subsystem) {
+    /* Subsystem 0 in the table (see port.h, changed 2026-11-04) means "any
+     * subsystem" - match on device id alone for those rows. A real subsystem
+     * value in the table would still need to match exactly. */
+    if (C[0] == GuTargets[I].Device && (GuTargets[I].Subsystem == 0u || C[11] == GuTargets[I].Subsystem)) {
       Gu.target_device = GuTargets[I].Device;
-      Gu.target_subsystem = GuTargets[I].Subsystem;
+      Gu.target_subsystem = C[11];
       return TRUE;
     }
   }

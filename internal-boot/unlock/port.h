@@ -7,41 +7,31 @@
 #include <Protocol/DevicePath.h>
 #include <stddef.h>
 
-/* Every (device, subsystem) identity with an actual community-confirmed report of
- * this unlock working, quoted directly from nlzy/turing-unlock's own issue tracker
- * - not a guess, not a third-party database cross-reference. Every one of them is
- * explicitly reported as a VRAM-modified "22GB" card, never a stock retail board -
- * see PORTING-PLAN.md and README.md for why that matters. An earlier version of
- * this file (and this project's own docs and a GitHub comment) incorrectly said
- * "Dell-made" - that was wrong; "Dell" appears nowhere in any of these reports and
- * has been corrected throughout.
- *
- * Sources (github.com/nlzy/turing-unlock):
- *  - issue #1: device 10de:1e07, no subsystem given ("modified-memory card")
- *  - issue #2 (iogotop): 10de:1e07 / 10de:12fa
- *  - issue #2 (arbulin): 10de:1e07 / 10de:12a4 ("modified-memory")
- *  - issue #2 (blackxwhite88): 10de:1e04 / 10de:12ae - note: the reporter
- *    themselves calls this "a different device variant, not 1e07"
- *  - issue #22 (both cards): 10de:1e07 / 10de:12fa ("modified-memory cards")
- *  - issue #25: device 10de:1e04, no subsystem given, stock/modified not stated
- *
- * Only entries with BOTH a device id and a subsystem id actually reported are
- * included below - issue #1 and #25 are cited above for context but contribute no
- * table entry, since matching on device id alone would also match an unvalidated
- * stock card that happens to share it. Refuse rather than guess: GuTargetConfig
- * (port.c) accepts only an exact match against one of these rows, nothing else -
- * including a standard, unmodified 2080 Ti, even if someone can get one to boot
- * this far. If that is the card you actually have, this project does not (yet)
- * consider it validated here, on purpose - that is a statement about this
- * project's one upstream source, not a claim that a stock card can't work at
- * all; see PORTING-PLAN.md's "Known validation gap" for a different tool with
- * its own stock-card reports. */
-#define GU_TARGET_COUNT 3
+/* Changed 2026-11-04: broadened from an exact (device, subsystem) allow-list to the
+ * known Turing TU102 device-ID family, matching the same scope the read-only capture
+ * tool (internal-boot/boot/probe.c) already uses. Previously this matched only the
+ * specific board variants with a community-confirmed report in nlzy/turing-unlock's
+ * own issue tracker (all VRAM-modified "22GB" cards) and refused everything else,
+ * including a standard stock 2080 Ti, on purpose. That was the right call with no
+ * real-world evidence to go on. Since then: README.md's "What real-world reports
+ * actually show about the risk" section documents what full-thread reading of every
+ * relevant public report actually shows - no report of this unlock mechanism
+ * permanently damaging a card, including a detailed factory-stock 11GB TU102 success
+ * report (physicsdolphin/nv-uefi-unlocker#103). What is still unproven is whether
+ * *this project's own code* - never run against real hardware - handles any given
+ * card correctly; that is what BarCheck/PromCheck/ColdCheck/DisplayCheck (app.c) are
+ * for, and why this project ships a public risk disclaimer instead of only a private
+ * one. This list is now a device-family filter, not a claim that every board sharing
+ * one of these IDs has been individually confirmed - read README.md before running
+ * this on real hardware. Device IDs below are the Turing-family IDs already
+ * referenced throughout this project's docs/credits (10de:1e04, 10de:1e07); add
+ * others here only once there is a real reason to believe this port's register
+ * offsets apply to them too (e.g. same TU102/TU106 die family). */
+#define GU_TARGET_COUNT 2
 typedef struct { UINT32 Device, Subsystem; const char *Source; } GU_TARGET;
 static const GU_TARGET GuTargets[GU_TARGET_COUNT] = {
-  {0x1e0710deu, 0x12fa10deu, "turing-unlock issue #2 (iogotop) / #22 (both cards)"},
-  {0x1e0710deu, 0x12a410deu, "turing-unlock issue #2 (arbulin)"},
-  {0x1e0410deu, 0x12ae10deu, "turing-unlock issue #2 (blackxwhite88) - device variant 1e04, not 1e07"},
+  {0x1e0710deu, 0u, "TU102 2080 Ti family (10de:1e07) - any subsystem, see README.md"},
+  {0x1e0410deu, 0u, "TU102 2080 Ti family, device variant 1e04 - any subsystem, see README.md"},
 };
 
 #if defined(GU_HOST_WRITE_TEST) && __STDC_HOSTED__ != 1

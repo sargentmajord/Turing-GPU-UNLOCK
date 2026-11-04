@@ -535,5 +535,30 @@ card should be the boot-primary display (or the only display adapter), not a sec
 **Build status:** compiled and linked clean (both `build.ps1` modes) against a throwaway profile generated from
 one of the six captures, following the same discipline as every other profile used for compile verification in
 this project - built locally, never committed, discarded after the build. Not boot-tested; no profile exists yet
-that `GuTargets` actually accepts (Cancretto's cards remain correctly outside that allow-list - see "Known
-validation gap" above), so there is still nothing that can be run on real hardware from this change alone.
+that `GuTargets` actually accepted at the time this was written (see the update directly below, which changed
+that).
+
+## GuTargets broadened from a per-board allow-list to a device-ID family (2026-11-04)
+
+Everything above this section, and the "Known validation gap" table a few sections up, describes `GuTargets` as
+it was before this change: an exact allow-list of specific (device, subsystem) pairs, each with its own
+community-confirmed unlock report, refusing everything else including a standard stock 2080 Ti - correct and
+deliberate with no real-world evidence to inform a broader decision.
+
+That evidence now exists. `README.md`'s "What real-world reports actually show about the risk" section documents
+reading every comment on every relevant public report (not just titles): no report anywhere of this unlock
+mechanism permanently damaging a card, including a detailed factory-stock 11GB TU102 success report with
+confirmed reboot-reapply stability (physicsdolphin/nv-uefi-unlocker#103). On the strength of that, `GuTargets`
+(`port.h`) and `GuTargetConfig` (`port.c`) were changed to accept the Turing TU102 device-ID family
+(`10de:1e07`, `10de:1e04`) regardless of subsystem, rather than only specific pre-approved boards - the same
+scope the read-only capture tool's `probe.c` already used. The existing hardware checks
+(`BarCheck`/`PromCheck`/`ColdCheck`/`DisplayCheck`) are unchanged and still refuse on a genuinely wrong or
+unexpected card state; what changed is who gets to decide whether to try, not whether the code still checks its
+own work.
+
+Said plainly, since this is exactly the kind of thing to not blur: this is evidence the *mechanism* doesn't
+damage cards, not evidence that *this project's own code* - which has never run against real hardware, still, as
+of this change - correctly handles every card in that device family. That gap is now disclosed publicly
+(README.md) rather than enforced by a maintainer allow-list; anyone running the actual unlock transaction is
+doing so informed and at their own discretion, same as any other early real-hardware test of unreviewed firmware
+code. Compiled and linked clean (both build modes) against a throwaway profile after this change.
