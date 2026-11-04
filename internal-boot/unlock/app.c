@@ -37,6 +37,9 @@ static EFI_SYSTEM_TABLE *Table;
 static UINT32 InitialConfig[64];
 static const char *Stage;
 static GU_RELEASE_OWNER PendingOwner;
+/* Defined later (with DisplayCheck/TargetGopCheck, which also use it) - forward-declared here
+ * so FindTarget (next) can call it for multi-candidate disambiguation. */
+static BOOLEAN LocationHasValidGop(UINTN Seg, UINTN Bus, UINTN Dev, UINTN Fun);
 
 static EFI_STATUS Step(EFI_STATUS Status) {
   GuLog("CHECK stage=%s status=%#llx\n", Stage, (unsigned long long)Status);
@@ -85,8 +88,23 @@ static EFI_STATUS ReadConfig(UINT32 *Config) {
   }
   return EFI_SUCCESS;
 }
+/* Up to 2026-11-04 this refused outright unless exactly one PCI device matched GuTargets -
+ * meaning two installed matching cards (not an unusual setup: a tester comparing a known-good
+ * card against a new one, or someone who simply has two) meant physically removing one before
+ * this tool would even look at the system, a real, avoidable burden. Changed to collect every
+ * match and, when there is more than one, disambiguate using the same real signal DisplayCheck
+ * already relies on for its own, narrower job (see LocationHasValidGop's own comment): the
+ * target is the one actual card driving a display right now. Still refuses, correctly, if zero
+ * or more than one candidate has its own GOP - that is a genuine ambiguity (e.g. two monitors,
+ * one on each matching card), not something to guess through. A single match is entirely
+ * unaffected by this change - same behavior as before. */
+#define GU_MAX_TARGET_CANDIDATES 16
 static EFI_STATUS FindTarget(VOID) {
   EFI_HANDLE *handles = NULL; UINTN count = 0, found = 0;
+  EFI_HANDLE cand_handle[GU_MAX_TARGET_CANDIDATES];
+  EFI_PCI_IO_PROTOCOL *cand_pci[GU_MAX_TARGET_CANDIDATES];
+  UINTN cand_seg[GU_MAX_TARGET_CANDIDATES], cand_bus[GU_MAX_TARGET_CANDIDATES];
+  UINTN cand_dev[GU_MAX_TARGET_CANDIDATES], cand_fun[GU_MAX_TARGET_CANDIDATES];
   EFI_STATUS status = Gu.bs->LocateHandleBuffer(ByProtocol, &PciGuid, NULL, &count, &handles);
   GuLog("PCI enumeration: status=%#llx handles=%zu\n", (unsigned long long)status, (size_t)count);
   if (EFI_ERROR(status) || !handles || !count || count > 256) { if (handles) GuFree(handles); return EFI_NOT_FOUND; }
@@ -97,10 +115,29 @@ static EFI_STATUS FindTarget(VOID) {
     if (!EFI_ERROR(status) && pci) for (UINTN w = 0; w < 12 && !EFI_ERROR(status); w++)
       status = pci->Pci.Read(pci, EfiPciIoWidthUint32, (UINT32)w * 4, 1, &config[w]);
     if (EFI_ERROR(status) || !pci) { GuLog("PCI scan failed: index=%zu status=%#llx\n", (size_t)i, (unsigned long long)status); status = EFI_DEVICE_ERROR; break; }
-    if (GuTargetConfig(config, segment, bus, device, function)) { found++; Gu.handle = handles[i]; Gu.pci = pci; }
+    if (GuTargetConfig(config, segment, bus, device, function)) {
+      if (found < GU_MAX_TARGET_CANDIDATES) {
+        cand_handle[found] = handles[i]; cand_pci[found] = pci;
+        cand_seg[found] = segment; cand_bus[found] = bus; cand_dev[found] = device; cand_fun[found] = function;
+      }
+      found++; Gu.handle = handles[i]; Gu.pci = pci; /* last match wins if found==1 in the end, as before */
+    }
   }
   GuFree(handles); GuLog("PCI target matches=%zu status=%#llx\n", (size_t)found, (unsigned long long)status);
-  if (EFI_ERROR(status) || found != 1) return EFI_UNSUPPORTED;
+  if (EFI_ERROR(status) || !found) return EFI_UNSUPPORTED;
+  if (found > 1) {
+    if (found > GU_MAX_TARGET_CANDIDATES) return EFI_UNSUPPORTED; /* more matches than we even kept track of - refuse, don't guess */
+    UINTN gop_owner = found; /* sentinel: none found yet */
+    for (UINTN c = 0; c < found; c++) {
+      if (LocationHasValidGop(cand_seg[c], cand_bus[c], cand_dev[c], cand_fun[c])) {
+        if (gop_owner != found) { gop_owner = found + 1; break; } /* a second owner - genuinely ambiguous */
+        gop_owner = c;
+      }
+    }
+    GuLog("multi-candidate disambiguation: matches=%zu gop_owner_index=%zu\n", (size_t)found, (size_t)gop_owner);
+    if (gop_owner >= found) return EFI_UNSUPPORTED; /* zero or more than one candidate has its own display - refuse */
+    Gu.handle = cand_handle[gop_owner]; Gu.pci = cand_pci[gop_owner];
+  }
   status = ReadConfig(InitialConfig);
   if (!EFI_ERROR(status)) { Gu.owned = FALSE; ConfigLog(InitialConfig); }
   return status;
@@ -225,16 +262,17 @@ static EFI_STATUS ColdCheck(VOID) {
  * card has a GOP of its own" is a genuine, evidence-backed correctness signal
  * here, checked independently and earlier than PromCheck (which would catch
  * the same bad state anyway, but only after BarCheck has already run). */
-static BOOLEAN TargetGopCheck(VOID) {
+/* Shared by TargetGopCheck (below, checks Gu.pci's own already-selected location) and
+ * FindTarget's multi-candidate disambiguation (added 2026-11-04, see that function's own
+ * comment): does the card at this exact PCI location have its own bound, valid display
+ * output right now? True for at most one candidate is how FindTarget tells two or more
+ * installed matching cards apart without needing a human to physically remove one - the
+ * same real, evidence-backed signal DisplayCheck already uses for its own, narrower job. */
+static BOOLEAN LocationHasValidGop(UINTN TargetSeg, UINTN TargetBus, UINTN TargetDev, UINTN TargetFun) {
   EFI_HANDLE *handles = NULL; UINTN count = 0;
   EFI_STATUS status = Gu.bs->LocateHandleBuffer(ByProtocol, &GopGuid, NULL, &count, &handles);
   GuLog("GOP enumeration: status=%#llx handles=%zu\n", (unsigned long long)status, (size_t)count);
   if (EFI_ERROR(status) || !handles || !count || count > 16) { if (handles) GuFree(handles); return FALSE; }
-  UINTN target_seg, target_bus, target_dev, target_fun;
-  if (!Gu.pci || !Gu.pci->GetLocation ||
-    EFI_ERROR(Gu.pci->GetLocation(Gu.pci, &target_seg, &target_bus, &target_dev, &target_fun))) {
-    GuFree(handles); return FALSE;
-  }
   BOOLEAN found = FALSE;
   for (UINTN i = 0; i < count && !found; i++) {
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL; EFI_DEVICE_PATH_PROTOCOL *path = NULL, *remaining;
@@ -251,7 +289,7 @@ static BOOLEAN TargetGopCheck(VOID) {
     if (EFI_ERROR(pci->GetLocation(pci, &seg, &bus, &dev, &fun))) continue;
     GuLog("GOP[%u] PCI parent: seg=%#llx bus=%#llx dev=%#llx fun=%#llx\n",
       (unsigned)i, (unsigned long long)seg, (unsigned long long)bus, (unsigned long long)dev, (unsigned long long)fun);
-    if (seg != target_seg || bus != target_bus || dev != target_dev || fun != target_fun) continue;
+    if (seg != TargetSeg || bus != TargetBus || dev != TargetDev || fun != TargetFun) continue;
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *mode = gop->Mode;
     if (!mode->Info || mode->SizeOfInfo < sizeof(*mode->Info) || !mode->FrameBufferBase || !mode->FrameBufferSize ||
       mode->Info->PixelFormat > PixelBlueGreenRedReserved8BitPerColor ||
@@ -268,6 +306,14 @@ static BOOLEAN TargetGopCheck(VOID) {
   }
   GuFree(handles);
   return found;
+}
+static BOOLEAN TargetGopCheck(VOID) {
+  UINTN target_seg, target_bus, target_dev, target_fun;
+  if (!Gu.pci || !Gu.pci->GetLocation ||
+    EFI_ERROR(Gu.pci->GetLocation(Gu.pci, &target_seg, &target_bus, &target_dev, &target_fun))) {
+    return FALSE;
+  }
+  return LocationHasValidGop(target_seg, target_bus, target_dev, target_fun);
 }
 static BOOLEAN DisplayCheck(VOID) {
   BOOLEAN ok = TargetGopCheck();
