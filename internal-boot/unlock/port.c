@@ -17,8 +17,17 @@ BOOLEAN GuTargetConfig(const UINT32 *C, UINTN S, UINTN B, UINTN D, UINTN F) {
    * just device+subsystem: class code byte == 3 (PCI class 0x03, display
    * controller - this is actually a GPU) and header type == 0 (a normal device,
    * not a bridge). Cheap, and catches a device-ID collision with something that
-   * is not even a graphics card. */
-  if (!C || S || B != 1 || D || F || (C[2] >> 24) != 3 || ((C[3] >> 16) & 0x7f)) return FALSE;
+   * is not even a graphics card. Segment/device/function are still pinned to 0 -
+   * standard for a discrete GPU's own PCI function, true across every real
+   * capture seen so far. Bus number is NOT pinned (changed 2026-11-04, was
+   * B != 1): bus numbering is assigned per-motherboard by chipset/slot/BIOS
+   * enumeration order, not something that generalizes from one reference
+   * machine - FindTarget (above) already requires exactly one matching PCI
+   * device system-wide (found != 1 fails), so nothing relies on this function
+   * also constraining to a specific bus for safety. A hardcoded bus number here
+   * would have refused a correctly-matching card for a motherboard-specific
+   * reason that has nothing to do with the card itself. */
+  if (!C || S || D || F || (C[2] >> 24) != 3 || ((C[3] >> 16) & 0x7f)) return FALSE;
   for (I = 0; I < GU_TARGET_COUNT; I++) {
     /* Subsystem 0 in the table (see port.h, changed 2026-11-04) means "any
      * subsystem" - match on device id alone for those rows. A real subsystem

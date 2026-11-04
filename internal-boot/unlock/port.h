@@ -30,8 +30,8 @@
 #define GU_TARGET_COUNT 2
 typedef struct { UINT32 Device, Subsystem; const char *Source; } GU_TARGET;
 static const GU_TARGET GuTargets[GU_TARGET_COUNT] = {
-  {0x1e0710deu, 0u, "TU102 2080 Ti family (10de:1e07) - any subsystem, see README.md"},
-  {0x1e0410deu, 0u, "TU102 2080 Ti family, device variant 1e04 - any subsystem, see README.md"},
+  {0x1e0710deu, 0x0u, "TU102 2080 Ti family (10de:1e07) - any subsystem, see README.md"},
+  {0x1e0410deu, 0x0u, "TU102 2080 Ti family, device variant 1e04 - any subsystem, see README.md"},
 };
 
 #if defined(GU_HOST_WRITE_TEST) && __STDC_HOSTED__ != 1
