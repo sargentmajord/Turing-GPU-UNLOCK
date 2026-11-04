@@ -596,3 +596,64 @@ already fixed in that commit - found four more, by actually testing rather than 
    so nobody assumes otherwise from the device-id broadening alone: broadening `GuTargets` made the right
    *kind* of card eligible, it did not create a working profile from data that was never going to produce
    one.
+
+## Standing code-review checklist added (2026-11-04)
+
+In direct response to real misses this session (caught by the user, not by a review pass that should have
+caught them): `docs/CODE-REVIEW-CHECKLIST.md` now exists as a standing, repo-local methodology doc - read it
+in full before and during any review/verification pass on this project, not just this once. Committed as
+`765ca2a` (master) / mirrored to `publish` as `9872df5` (pre-identity-fix SHA; see below).
+
+## Multi-GPU disambiguation: `FindTarget` no longer requires removing a card (2026-11-04)
+
+User objection that mattered: requiring exactly one matching card meant anyone with two Turing cards
+installed had to physically pull one just to get a usable capture/unlock run - not acceptable to ask of
+testers.
+
+Fix, in `internal-boot/unlock/app.c`:
+- `FindTarget` now collects up to `GU_MAX_TARGET_CANDIDATES` (16) matching candidates instead of just a
+  count.
+- If exactly one match: unchanged behavior.
+- If more than one: disambiguate using the same evidence-backed signal `DisplayCheck` already relies on -
+  which candidate has its own bound, sane GOP (display output). `TargetGopCheck`'s body was refactored into
+  a new, location-parameterized `LocationHasValidGop(Seg, Bus, Dev, Fun)` so it's reusable per-candidate, not
+  just for `Gu.pci`'s own location.
+- If zero or more than one candidate has a valid GOP: refuse safely, same end behavior as before for the
+  genuinely-ambiguous case.
+
+Verified: hand-traced the 0/1/2+ GOP-owner branches; rebuilt clean in both preflight and
+`-ExperimentalUnlock` modes via the elevated runner (exit 0 both). Committed as `5a14a5e` (master), mirrored
+to `publish` as `dcfeb54` under the Sargentmajord identity, pushed to `origin publish`.
+
+**Important limitation, found by re-reading Cancretto's actual capture data rather than assuming the fix
+covers everything**: this only resolves ambiguity when the *other* matching card has no active display. It
+does **not** help when two identical matching cards both have an active monitor at once - checked
+Cancretto's own "2x 2080 Ti, no iGPU, DP on GPU1 + HDMI on GPU2" capture log directly: `gops=0002`, both GOP
+handles resolve to real, sane framebuffers (`mode=3`, 1024x768, valid addresses). Two cards that both look
+equally valid can't be disambiguated by this signal - there's nothing left to tell them apart, and refusing
+is the correct behavior there, not a bug.
+
+**`tools/profile_gen.py` was deliberately NOT given the matching fix.** It has its own, separate
+`target-count`-exactly-one refusal in `build_profile()`. Decided not to replicate the C-side fix there yet,
+because (a) it would require parsing raw EFI device-path bytes out of a capture log in Python, real and
+fiddly work, and (b) critically, none of Cancretto's existing captures exercise the actual success case (one
+matching card with a display, one without) - his dual-card tests always had both cards actively displaying,
+which the paragraph above already establishes is unresolvable either way. Shipping a disambiguation
+implementation with no real data to verify it against was judged not worth the risk. If a future capture
+ever shows that exact "one active, one idle" pattern, revisit this.
+
+## Reply posted to Cancretto (2026-11-04)
+
+Posted to `sargentmajord/Windows-GPU-UNLOCK#2`
+(https://github.com/sargentmajord/Windows-GPU-UNLOCK/issues/2#issuecomment-6631808106), after drafting and
+getting explicit approval first (standing rule: never post without it). Content, based only on what he
+actually told us in his own comments, not on internal implementation discussion he was never part of:
+- His cards (stock EVGA FTW3 11GB, device id `10de:1e07`) are now within the accepted target list.
+- Building an actual profile needs exactly one card clearly identified via display ownership; his "both
+  cards installed, no iGPU" captures had both cards displaying, so neither can be distinguished - not
+  something he did wrong, just not enough information.
+- Asked for one more capture: both cards installed, but only one connected to a monitor this time.
+
+Deliberately left out: anything about `FindTarget`/`GOP`/internal code refactor specifics, or the earlier
+internal "would he need to pull a card" discussion - none of that is something he said or needs to know
+about to act on the actual ask.
