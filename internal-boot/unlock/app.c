@@ -27,10 +27,12 @@
 #include "vendor/unlock.h"
 #include "vendor/gfw_eval.h"
 #include <Protocol/GraphicsOutput.h>
+#include <Protocol/DevicePath.h>
 #include <IndustryStandard/Acpi.h>
 #include <Guid/GlobalVariable.h>
 
-static EFI_GUID PciGuid = EFI_PCI_IO_PROTOCOL_GUID, GlobalGuid = EFI_GLOBAL_VARIABLE;
+static EFI_GUID PciGuid = EFI_PCI_IO_PROTOCOL_GUID, GopGuid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID,
+  PathGuid = EFI_DEVICE_PATH_PROTOCOL_GUID, GlobalGuid = EFI_GLOBAL_VARIABLE;
 static EFI_SYSTEM_TABLE *Table;
 static UINT32 InitialConfig[64];
 static const char *Stage;
@@ -205,12 +207,72 @@ static EFI_STATUS ColdCheck(VOID) {
   return EFI_SUCCESS;
 #endif
 }
-/* Needs the real console/display topology (which GPU, if any, drives the
- * display; its PCI path) from a real capture - this varies per test machine and
- * cannot be assumed. Port from app.c's DisplayCheck once that exists. */
+/* Real now - 2026-11-04, built from Cancretto's six real-hardware captures
+ * (one, two and iGPU+discrete display-adapter configurations; see
+ * PORTING-PLAN.md's "DisplayCheck: what the captures actually showed" for the
+ * full data). Unlike Ampere's DisplayCheck, this does NOT require a second,
+ * distinct "console" adapter: FindTarget() above already requires exactly one
+ * PCI device matching GuTargets (found != 1 is refused there), so there is
+ * only ever one target card to check, never a separate console GPU to
+ * identify by a compile-time GU_OTHER_GPU_ID/SUBSYSTEM pair. Across all six
+ * captures, whether the target card had its own bound GOP (i.e. was actually
+ * POSTed) was a perfect, 100%-consistent predictor of whether its live PROM
+ * hash matched the known-good value: both discrete cards got a GOP and a
+ * correct hash whenever no iGPU displaced them as the boot-primary adapter;
+ * neither one got a GOP, and BOTH read the same wrong hash, in every capture
+ * where the iGPU was primary - a real hardware behavior (the un-POSTed card's
+ * expansion-ROM window reads differently), not a probe bug. So "the target
+ * card has a GOP of its own" is a genuine, evidence-backed correctness signal
+ * here, checked independently and earlier than PromCheck (which would catch
+ * the same bad state anyway, but only after BarCheck has already run). */
+static BOOLEAN TargetGopCheck(VOID) {
+  EFI_HANDLE *handles = NULL; UINTN count = 0;
+  EFI_STATUS status = Gu.bs->LocateHandleBuffer(ByProtocol, &GopGuid, NULL, &count, &handles);
+  GuLog("GOP enumeration: status=%#llx handles=%zu\n", (unsigned long long)status, (size_t)count);
+  if (EFI_ERROR(status) || !handles || !count || count > 16) { if (handles) GuFree(handles); return FALSE; }
+  UINTN target_seg, target_bus, target_dev, target_fun;
+  if (!Gu.pci || !Gu.pci->GetLocation ||
+    EFI_ERROR(Gu.pci->GetLocation(Gu.pci, &target_seg, &target_bus, &target_dev, &target_fun))) {
+    GuFree(handles); return FALSE;
+  }
+  BOOLEAN found = FALSE;
+  for (UINTN i = 0; i < count && !found; i++) {
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL; EFI_DEVICE_PATH_PROTOCOL *path = NULL, *remaining;
+    EFI_HANDLE parent = NULL; EFI_PCI_IO_PROTOCOL *pci = NULL; UINTN seg, bus, dev, fun;
+    status = Gu.bs->HandleProtocol(handles[i], &GopGuid, (VOID **)&gop);
+    if (EFI_ERROR(status) || !gop || !gop->Mode) { GuLog("GOP[%u] invalid protocol/mode\n", (unsigned)i); continue; }
+    status = Gu.bs->HandleProtocol(handles[i], &PathGuid, (VOID **)&path);
+    if (EFI_ERROR(status) || !path || !Gu.bs->LocateDevicePath) continue;
+    remaining = path;
+    status = Gu.bs->LocateDevicePath(&PciGuid, &remaining, &parent);
+    if (EFI_ERROR(status) || !parent) continue;
+    status = Gu.bs->HandleProtocol(parent, &PciGuid, (VOID **)&pci);
+    if (EFI_ERROR(status) || !pci || !pci->GetLocation) continue;
+    if (EFI_ERROR(pci->GetLocation(pci, &seg, &bus, &dev, &fun))) continue;
+    GuLog("GOP[%u] PCI parent: seg=%#llx bus=%#llx dev=%#llx fun=%#llx\n",
+      (unsigned)i, (unsigned long long)seg, (unsigned long long)bus, (unsigned long long)dev, (unsigned long long)fun);
+    if (seg != target_seg || bus != target_bus || dev != target_dev || fun != target_fun) continue;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *mode = gop->Mode;
+    if (!mode->Info || mode->SizeOfInfo < sizeof(*mode->Info) || !mode->FrameBufferBase || !mode->FrameBufferSize ||
+      mode->Info->PixelFormat > PixelBlueGreenRedReserved8BitPerColor ||
+      !mode->Info->HorizontalResolution || !mode->Info->VerticalResolution ||
+      mode->Info->PixelsPerScanLine < mode->Info->HorizontalResolution ||
+      (UINT64)mode->Info->PixelsPerScanLine * mode->Info->VerticalResolution > mode->FrameBufferSize / 4) {
+      GuLog("GOP[%u] matches target BDF but mode/framebuffer is not sane\n", (unsigned)i);
+      continue;
+    }
+    GuLog("GOP[%u] matches target card: framebuffer=%#llx bytes=%zu res=%ux%u\n", (unsigned)i,
+      (unsigned long long)mode->FrameBufferBase, (size_t)mode->FrameBufferSize,
+      (unsigned)mode->Info->HorizontalResolution, (unsigned)mode->Info->VerticalResolution);
+    found = TRUE;
+  }
+  GuFree(handles);
+  return found;
+}
 static BOOLEAN DisplayCheck(VOID) {
-  GuLogText("DisplayCheck: not implemented - needs a real machine profile, see PORTING-PLAN.md.\n");
-  return FALSE;
+  BOOLEAN ok = TargetGopCheck();
+  GuLog("DisplayCheck: target card has its own valid GOP=%u\n", (unsigned)ok);
+  return ok && GuLogReady();
 }
 /* ---- These two are real now: checks.c and ownership.c are both ported (see
  * their own file headers - neither has any Ampere-specific content, so nothing

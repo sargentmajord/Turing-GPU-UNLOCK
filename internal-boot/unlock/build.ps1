@@ -35,6 +35,10 @@ try {
  if (!$profileDir -and $HardwareProfile -eq 'TEMPLATE') {
   Write-Warning 'Using profiles/TEMPLATE/profile.h - every value in it is a placeholder, and it carries a build-time #error on purpose (see machine-profile.h). This run can only prove the build plumbing itself (flags, include paths, source list) is wired correctly; it cannot and must not produce working firmware. See PORTING-PLAN.md''s "two-stage architecture" for what a real profile actually needs.'
  }
+ # The resolved profile (from $env:CPATH when set, else profiles/$HardwareProfile) is what actually got
+ # compiled - log that, not the -HardwareProfile parameter's default, which is wrong/misleading whenever
+ # CPATH is used (as every real build does): it would print "profile=TEMPLATE" even for a real machine.
+ $resolvedProfileLabel = if ($profileDir) { Split-Path -Leaf $profileDir } else { $HardwareProfile }
 
  $out = if ($ExperimentalUnlock) { 'build/experimental' } else { 'build/preflight' }
  $name = if ($ExperimentalUnlock) { 'TURING2080TI-EXPERIMENTAL' } else { 'TURING2080TI-PREFLIGHT' }
@@ -63,7 +67,7 @@ try {
 
  [ordered]@{
   BuiltUtc         = [DateTime]::UtcNow.ToString('o')
-  HardwareProfile  = $HardwareProfile
+  HardwareProfile  = $resolvedProfileLabel
   Mode             = if ($ExperimentalUnlock) { 'experimental-manual-unlock' } else { 'diagnostic-preflight-only' }
   CanArm           = [bool]$ExperimentalUnlock
   Defines          = $defines
@@ -71,5 +75,5 @@ try {
   EfiSha256        = (Get-FileHash -LiteralPath "$out/$name.EFI" -Algorithm SHA256).Hash
   Sources          = @($sources | ForEach-Object { [ordered]@{ Path = "$_.c"; Sha256 = (Get-FileHash -LiteralPath "$_.c" -Algorithm SHA256).Hash } })
  } | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -LiteralPath "$out/build-manifest.json"
- "Built $name.EFI; ExperimentalUnlock=$([bool]$ExperimentalUnlock); profile=$HardwareProfile; hardware untested."
+ "Built $name.EFI; ExperimentalUnlock=$([bool]$ExperimentalUnlock); profile=$resolvedProfileLabel; hardware untested."
 } finally { Pop-Location }

@@ -461,3 +461,58 @@ adopting its (much broader, GTX16-RTX40) scope or its own `GuTargets`-equivalent
 else's issue tracker alone - but the narrower point stands: a stock 2080 Ti being unvalidated here is a gap in
 what *this port* (and the one upstream repo it's built from) has confirmed, not evidence that stock Turing cards
 can't work at all.
+
+## DisplayCheck: real now, built from six real-hardware captures (2026-11-04)
+
+Cancretto (github.com/sargentmajord/Windows-GPU-UNLOCK#2) ran the stage-1 capture tool six times across three
+display topologies on their two stock, unmodified 11GB EVGA 2080 Ti FTW3 cards: one card with the motherboard's
+integrated graphics as the primary display, two cards with no iGPU, and two cards plus the iGPU as primary -
+each topology captured once with Resizable BAR on and once off. All six captures finished cleanly
+(`capture-complete=1`), so this is the first real multi-adapter data this project has had.
+
+**What it showed, and why DisplayCheck didn't need Ampere's design:** Ampere's own `DisplayCheck` requires a
+*second*, distinct "console" GPU, identified by a compile-time `GU_OTHER_GPU_ID`/`GU_OTHER_GPU_SUBSYSTEM` pair -
+its reference machine has a dedicated console adapter separate from the target card. Turing's `FindTarget()`
+already refuses unless exactly one PCI device matches `GuTargets` (`found != 1` is rejected), so there is only
+ever one target card to validate, never a second adapter to identify by a hardcoded identity. Porting Ampere's
+model as-is would have meant inventing a two-adapter design nothing here actually has.
+
+The six captures gave a cleaner signal instead. Across all of them, whether the target card had its own bound GOP
+(i.e. had actually been POSTed) was a perfect predictor of whether its live PROM hash matched the known-good
+value:
+
+| Configuration | Rebar | GOPs on the target card(s) | PROM hash |
+|---|---|---|---|
+| 1x 2080 Ti, iGPU primary | off/on | 0 of 1 | `f5fb04aa...` (wrong) |
+| 2x 2080 Ti, no iGPU | off/on | 2 of 2 | `281602497e...` (matches known-good) |
+| 2x 2080 Ti, iGPU primary | off/on | 0 of 2 | `f5fb04aa...` (wrong, both cards) |
+
+Resizable BAR made no difference in any configuration. Whenever the iGPU was the boot-primary display, *every*
+discrete card - whether one or two were installed - never got a GOP bound to it at all (`gops=1`, the iGPU's own,
+system-wide), and every discrete card's live PROM read came back with the same wrong hash. Whenever no iGPU was
+present, each discrete card got its own GOP and the correct hash, independent of card count or Rebar. This is a
+real hardware effect, not a probe bug: an un-POSTed card's expansion-ROM-window read differs from a POSTed one's,
+and whether a card gets POSTed on a multi-adapter system depends on which adapter the firmware picked as primary,
+not on anything the capture tool controls.
+
+That makes "does the target card have its own valid, bound GOP" a genuine, evidence-backed correctness signal,
+independent of and earlier than `PromCheck` (which would also refuse in this situation, once it finally runs, but
+only after `BarCheck` already has). Implemented as `TargetGopCheck()` in `app.c`: enumerate all GOP handles,
+resolve each one's PCI parent via `LocateDevicePath`/`PciGuid` (not a compile-time identity - compared directly
+against `Gu.pci`'s own `GetLocation()`, since the target is already known by the time `DisplayCheck` runs), and
+require the match to have a sane `FrameBufferBase`/`FrameBufferSize`/mode. No `GU_OTHER_GPU_*` profile fields are
+read by this logic at all; those remain untouched placeholders for a hypothetical future second-adapter design,
+not because this check still needs them.
+
+**Practical implication for testers and for this project's own guidance going forward, not a safety bug:**
+someone whose target card is not the boot-primary display (an iGPU or a different card set as primary in BIOS)
+will get a correct, safe refusal from `DisplayCheck` - the same "refuse rather than guess" behavior as everywhere
+else in this project - even though their card and its firmware are completely fine. This should be called out
+explicitly in any future testing instructions once `GU_EXPERIMENTAL_UNLOCK` testing actually starts: the target
+card should be the boot-primary display (or the only display adapter), not a secondary one.
+
+**Build status:** compiled and linked clean (both `build.ps1` modes) against a throwaway profile generated from
+one of the six captures, following the same discipline as every other profile used for compile verification in
+this project - built locally, never committed, discarded after the build. Not boot-tested; no profile exists yet
+that `GuTargets` actually accepts (Cancretto's cards remain correctly outside that allow-list - see "Known
+validation gap" above), so there is still nothing that can be run on real hardware from this change alone.
