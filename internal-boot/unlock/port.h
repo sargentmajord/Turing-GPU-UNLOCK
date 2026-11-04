@@ -102,13 +102,16 @@ typedef struct {
 extern GU_PLATFORM Gu;
 
 VOID GuInit(EFI_BOOT_SERVICES *Bs, EFI_PCI_IO_PROTOCOL *Pci);
-/* True only for an exact (device, subsystem) match against GuTargets above, in
- * which case Gu.target_device/target_subsystem are set to the matching row for
- * later checks to use. Deliberately narrower than nlzy/turing-unlock's own
- * supported_ids[] list (kernel/turing_unlock/main.c), which includes several
- * TU102 device IDs plus TU104 and TU106 marked "(not tested)" in its own source.
- * Refuse rather than guess, the same posture sargentmajord/Windows-GPU-UNLOCK's
- * installer already takes for Ampere cards. */
+/* True for a device-id match against GuTargets above (subsystem 0 in the table
+ * means "any subsystem" - see that table's own comment for why, changed
+ * 2026-11-04), in which case Gu.target_device/target_subsystem are set from the
+ * card's own live config space for later checks to use. Deliberately narrower
+ * than nlzy/turing-unlock's own supported_ids[] list (kernel/turing_unlock/main.c),
+ * which includes several TU102 device IDs plus TU104 and TU106 marked "(not
+ * tested)" in its own source - this project only accepts device IDs with a real
+ * reason (a community-confirmed report, or this project's own register-layout
+ * assumptions) to believe they work. Refuse rather than guess, the same posture
+ * sargentmajord/Windows-GPU-UNLOCK's installer already takes for Ampere cards. */
 BOOLEAN GuTargetConfig(const UINT32 *Config, UINTN Segment, UINTN Bus, UINTN Device, UINTN Function);
 BOOLEAN GuSafeToReturn(VOID);
 EFI_STATUS GuDmaAllocate(UINTN Bytes, VOID **Cpu, UINT64 *Dma);

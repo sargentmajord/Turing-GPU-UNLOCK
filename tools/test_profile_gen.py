@@ -55,7 +55,11 @@ def synthetic_accepted_text():
 
 
 class RealCapture(unittest.TestCase):
-    """Against Cancretto's actual, unmutated capture - a stock card, correctly outside GuTargets."""
+    """Against Cancretto's actual, unmutated capture - a stock card, in GuTargets' device-id family
+    since 2026-11-04 (see port.h), but still refused: this specific capture was taken with the iGPU as
+    boot-primary, so the card was never POSTed and several registers - memory size here, PROM hash
+    elsewhere (PORTING-PLAN.md's "DisplayCheck: what the captures actually showed") - read un-POSTed
+    values rather than real ones. Refused for that reason now, not for being a stock card."""
 
     @classmethod
     def setUpClass(cls):
@@ -85,17 +89,20 @@ class RealCapture(unittest.TestCase):
         # PORTING-PLAN.md's 2026-11-03 entry. Not a parsing bug: this is genuinely what the register read.
         self.assertTrue(pg.is_bad_sentinel(self.cap.mmio[pg.OFF_MEMORY]))
 
-    def test_refused_for_not_being_a_target_card(self):
-        f = refused(self, self.text, 'not-a-target-card')
-        self.assertIn('0x1e0710de', f.message)
-        self.assertIn('0xa0161b4c', f.message)
+    def test_device_id_is_now_accepted_but_capture_still_refused_on_memory_register(self):
+        # Changed 2026-11-04: device-id alone is enough to pass GuTargets now (port.h), so this capture
+        # gets past the old 'not-a-target-card' refusal and hits the real, pre-existing problem instead -
+        # see test_memory_register_is_the_known_not_ready_sentinel above. Confirms the two findings are
+        # the same root cause (card not POSTed), not a regression from broadening the device match.
+        f = refused(self, self.text, 'memory-size-not-ready')
+        self.assertIn('0x1183a4', f.message)
 
     def test_gu_targets_from_port_h_finds_the_real_table(self):
         rows = pg.gu_targets_from_port_h()
-        self.assertEqual(len(rows), 3)
-        device, subsystem = self.cap.cfg[0], self.cap.cfg[11]
-        self.assertFalse(any(d == device and s == subsystem for d, s, _ in rows),
-                          'this card must not already be in GuTargets - it is a stock card, not a confirmed unlock')
+        self.assertEqual(len(rows), 2)
+        device = self.cap.cfg[0]
+        self.assertTrue(any(d == device and s == 0 for d, s, _ in rows),
+                         'this card\'s device id should now match a wildcard-subsystem row (changed 2026-11-04)')
 
 
 class SyntheticAcceptedCard(unittest.TestCase):
@@ -146,6 +153,15 @@ class Refusals(unittest.TestCase):
 
     def test_two_matching_cards(self):
         refused(self, self.mutate(r'^probe targets=0001$', 'probe targets=0002'), 'target-count')
+
+    def test_mmio_unmapped_chip_id_all_ones(self):
+        # Found against a real capture, not invented: one of Cancretto's six multi-adapter captures
+        # (1x 2080 Ti + iGPU primary, Rebar on) had BAR0 not decoding at all - every single mmio
+        # register in it, not just chip-id, read exactly 0xffffffff. Before this check existed,
+        # profile_gen.py accepted that capture (ok: true) and would have baked 0xffffffff in as the
+        # expected chip id, a profile that could never pass ColdCheck on any real hardware.
+        f = refused(self, self.mutate(r'^(mmio off=0x00000000 status=0x0+ value=)0x[0-9a-f]+$', r'\g<1>0xffffffff'), 'mmio-unmapped')
+        self.assertIn('0x000000', f.message)
 
     def test_gfw_register_bad_sentinel(self):
         f = refused(self, self.mutate(r'^(mmio off=0x00118128 status=0x0+ value=)0x[0-9a-f]+$', r'\g<1>0xbadf1234'), 'gfw-not-ready')

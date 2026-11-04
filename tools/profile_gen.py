@@ -220,6 +220,24 @@ def build_profile(c, profile_name, note=''):
     for off in (OFF_CHIP, OFF_MEMORY, OFF_PLM, OFF_BOOT, OFF_CPUCTL):
         if off not in m:
             refuse('registers-missing', 'The capture is missing register 0x%06x.' % off, 'Run the capture again.')
+    # 0xffffffff (every bit set) is the classic PCI/MMIO "nothing is actually responding at this
+    # address" sentinel - distinct from is_bad_sentinel()'s 0xbadfxxxx ("firmware hasn't finished
+    # booting yet", a real, mapped read). It is NOT caught by is_bad_sentinel() (0xffff0000 !=
+    # 0xbadf0000), and it defeats the CPUCTL_HALTED bitmask check below by construction (ANDing
+    # any mask against all-ones is always true) - found by actually testing a real capture where
+    # BAR0 was not decoding at all (every single mmio register in it read exactly 0xffffffff), not
+    # assumed. Checked on the chip-id register specifically: a real GA10x/TU10x chip id is never
+    # literally 0xffffffff, so this is a safe, specific signal that the capture couldn't actually
+    # talk to the card - not a guess about what caused that, which is a BIOS/ReBAR/boot-mode
+    # question for the person re-running the capture, not something this tool can diagnose further.
+    if m[OFF_CHIP] == 0xffffffff:
+        refuse('mmio-unmapped',
+               'Every register this capture read, starting with the chip-id register (0x%06x), reads '
+               '0xffffffff - BAR0 was not actually decoding during this capture, not a firmware-state '
+               'problem the other checks below are designed to catch.' % OFF_CHIP,
+               'Run the capture again. If it persists, check Above 4G Decoding/Resizable BAR/CSM in '
+               'the system BIOS and try a different boot/display configuration - a card whose BAR0 '
+               'genuinely never decodes cannot be captured no matter how many times this is run.')
     for off in (OFF_PLM, OFF_BOOT, OFF_CPUCTL):
         if is_bad_sentinel(m[off]):
             refuse('gfw-not-ready', 'Register 0x%06x reads %#x, a known "firmware boot not finished" value.' % (off, m[off]),

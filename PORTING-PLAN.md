@@ -562,3 +562,37 @@ of this change - correctly handles every card in that device family. That gap is
 (README.md) rather than enforced by a maintainer allow-list; anyone running the actual unlock transaction is
 doing so informed and at their own discretion, same as any other early real-hardware test of unreviewed firmware
 code. Compiled and linked clean (both build modes) against a throwaway profile after this change.
+
+## Post-broadening review (2026-11-04): one stale comment, two stale tests, one real validation gap
+
+Checked every file touched by the GuTargets broadening for leftover inconsistencies, not just the two
+already fixed in that commit - found four more, by actually testing rather than reading:
+
+1. `port.h`'s comment directly above the `GuTargetConfig` *declaration* (separate from the definition in
+   `port.c`, already fixed) still said "exact (device, subsystem) match" - stale, corrected.
+2. `tools/test_profile_gen.py` had two tests asserting the old behavior would still hold:
+   `test_refused_for_not_being_a_target_card` expected Cancretto's real capture to be refused for its
+   device id (now accepted); `test_gu_targets_from_port_h_finds_the_real_table` expected 3 table rows
+   (now 2). Both updated - the first now documents that the capture is still correctly refused, but for
+   the real, pre-existing reason (`memory-size-not-ready`, already known since the 2026-11-03 entry), not
+   a device-id mismatch. Full suite re-run: 16/16 before the fix below, 17/17 after.
+3. **Real validation gap, found by actually running `profile_gen.py` against all seven of Cancretto's
+   captures (the original plus the six from the DisplayCheck work), not assumed clean because the device
+   broadening worked:** one of them (1x 2080 Ti + iGPU primary, Rebar on) has BAR0 not decoding at all -
+   every single `mmio` register in it, not just the ones already checked, reads exactly `0xffffffff`. That
+   value is NOT caught by `is_bad_sentinel()` (`0xffff0000 != 0xbadf0000`) and defeats the
+   `CPUCTL_HALTED` bitmask check by construction (any mask ANDed with all-ones is true) - so this capture
+   was being accepted (`ok: true`) and would have baked `0xffffffff` in as the expected chip id, a profile
+   that could never pass `ColdCheck` on any real hardware. Fixed with an explicit, early check on the
+   chip-id register specifically (a real chip id is never literally `0xffffffff`), with a message pointing
+   at BIOS/ReBAR/boot-mode as the likely cause rather than guessing further. New regression test added
+   (`test_mmio_unmapped_chip_id_all_ones`), built from the real capture's own values, not invented.
+4. **The complete, honest result of testing all seven captures**: none of them currently produce a usable
+   profile. The four dual-card captures all refuse on `target-count` (exactly one matching card is
+   required; two were present). The two single-card-with-iGPU captures each fail for a different reason
+   tied to the same underlying cause already documented in "DisplayCheck: what the captures actually
+   showed" - the card was never POSTed because the iGPU was primary. **A usable profile needs one more
+   real capture: a single card installed (not both), with no iGPU as the primary display.** Said plainly
+   so nobody assumes otherwise from the device-id broadening alone: broadening `GuTargets` made the right
+   *kind* of card eligible, it did not create a working profile from data that was never going to produce
+   one.
