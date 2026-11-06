@@ -109,6 +109,11 @@ class Handle:
         self.path = []
         self.pci_location = None
         self.pci_config = None
+        self.gop = None  # dict (framebuffer/bytes/mode/max_mode/[width/height/stride]) if this handle
+        # supports EFI_GRAPHICS_OUTPUT_PROTOCOL - see diagnostic.c's Details(), 'gop' branch. width/
+        # height/stride are only present if gp->Mode->Info was valid when captured (diagnostic.c logs a
+        # separate "gop-info" problem line, not these fields, otherwise - see gop_is_sane()'s own note on
+        # why PixelFormat specifically can never be checked here).
 
 
 class Capture:
@@ -131,20 +136,42 @@ def parse_capture(text):
     c.targets = []
     for m in re.finditer(r'^probe-target seg=%s bus=%s dev=%s fun=%s$' % (HEX, HEX, HEX, HEX), head, re.M):
         c.targets.append({'pos': m.start(), 'seg': int(m[1], 16), 'bus': int(m[2], 16), 'dev': int(m[3], 16), 'fun': int(m[4], 16)})
-    cfgs = [(m.start(), [int(x, 16) for x in m[1].split()]) for m in re.finditer(r'^cfg dwords=([0-9a-f ]+)$', head, re.M)]
-    c.cfg = None
-    if len(c.targets) == 1:
-        after = [d for p, d in cfgs if p > c.targets[0]['pos']]
-        c.cfg = after[0] if after else None
-    m = re.search(r'^probe-bar0 base=%s$' % HEX, head, re.M)
-    c.bar0 = int(m[1], 16) if m else None
-    c.mmio = {}
-    for m in re.finditer(r'^mmio off=%s status=0x([0-9a-f]+) value=%s$' % (HEX, HEX), head, re.M):
-        if int(m[2], 16) == 0:
-            c.mmio[int(m[1], 16)] = int(m[3], 16)
-    m = re.search(r'^prom sha256=([0-9a-f]{64})$', head, re.M)
-    c.prom_sha = m[1] if m else None
-    c.caps = [(int(a, 16), int(b, 16)) for a, b in re.findall(r'^cap off=%s\ncap id=%s$' % (HEX, HEX), head, re.M)]
+    # probe.c's own ProbeBar() runs once per matching candidate (see its header comment and the per-target
+    # loop in probe.c), so cfg/caps/bar0/mmio/prom-sha each appear ONCE PER TARGET in the head, not once per
+    # capture - checked directly against probe.c, not assumed, after noticing this project's own captures
+    # never had more than one target before 2026-11-05's multi-card-with-one-display captures existed to
+    # show it. Everything below is scoped to each target's own slice of the head (from its own
+    # probe-target line to the next one's, or end of head) so a capture with more than one match can never
+    # have one candidate's cfg/bar0/mmio/PROM-hash/capabilities silently attributed to a different one -
+    # the old code here (a single flat regex scan of the whole head, last-match-wins for scalars) predates
+    # any capture with more than one target and would have mixed the two up the first time their values
+    # actually differed. Confirmed on Cancretto's two new captures that cfg differs between candidates
+    # (device location, obviously) while mmio/prom happened to read identically in both cards there - this
+    # scoping is what makes that not an accident the next capture is relied on to not expose.
+    bounds = [t['pos'] for t in c.targets] + [len(head)]
+    for i, t in enumerate(c.targets):
+        seg = head[bounds[i]:bounds[i + 1]]
+        m = re.search(r'^cfg dwords=([0-9a-f ]+)$', seg, re.M)
+        t['cfg'] = [int(x, 16) for x in m[1].split()] if m else None
+        m = re.search(r'^probe-bar0 base=%s$' % HEX, seg, re.M)
+        t['bar0'] = int(m[1], 16) if m else None
+        t['mmio'] = {}
+        for mm in re.finditer(r'^mmio off=%s status=0x([0-9a-f]+) value=%s$' % (HEX, HEX), seg, re.M):
+            if int(mm[2], 16) == 0:
+                t['mmio'][int(mm[1], 16)] = int(mm[3], 16)
+        m = re.search(r'^prom sha256=([0-9a-f]{64})$', seg, re.M)
+        t['prom_sha'] = m[1] if m else None
+        t['caps'] = [(int(a, 16), int(b, 16)) for a, b in re.findall(r'^cap off=%s\ncap id=%s$' % (HEX, HEX), seg, re.M)]
+    # Back-compat top-level fields - unchanged meaning for the single-target case every existing caller
+    # (including test_profile_gen.py's RealCapture/SyntheticAcceptedCard/Refusals classes) already relies
+    # on; disambiguate_multi_target() below re-populates these from whichever candidate it picks, so
+    # build_profile's own checks (which read c.cfg/c.bar0/c.mmio/c.prom_sha/c.caps, not t[...]) keep working
+    # unchanged after narrowing from more than one candidate too.
+    c.cfg = c.targets[0]['cfg'] if len(c.targets) == 1 else None
+    c.bar0 = c.targets[0]['bar0'] if len(c.targets) == 1 else None
+    c.mmio = c.targets[0]['mmio'] if len(c.targets) == 1 else {}
+    c.prom_sha = c.targets[0]['prom_sha'] if len(c.targets) == 1 else None
+    c.caps = c.targets[0]['caps'] if len(c.targets) == 1 else []
 
     # --- per-handle blocks (diagnostic.c's own handle/protocol walk, not probe.c) ---
     c.handles = {}
@@ -165,7 +192,97 @@ def parse_capture(text):
             continue
         m = re.fullmatch(r'pci config-dwords=([0-9a-f ]+)', line)
         if m: hcur.pci_config = [int(x, 16) for x in m[1].split()]; continue
+        m = re.fullmatch(r'gop framebuffer=%s bytes=%s mode=%s max-mode=%s' % (HEX, HEX, HEX, HEX), line)
+        if m:
+            hcur.gop = {'framebuffer': int(m[1], 16), 'bytes': int(m[2], 16),
+                        'mode': int(m[3], 16), 'max_mode': int(m[4], 16)}
+            continue
+        m = re.fullmatch(r'gop width=%s height=%s stride=%s' % (HEX, HEX, HEX), line)
+        if m and hcur.gop is not None:
+            hcur.gop.update({'width': int(m[1], 16), 'height': int(m[2], 16), 'stride': int(m[3], 16)})
+            continue
     return c
+
+
+def gop_is_sane(gop):
+    """As much of app.c's LocationHasValidGop mode/framebuffer sanity check as the capture log actually
+    lets this tool see. One sub-check it cannot replicate: LocationHasValidGop also rejects a PixelFormat
+    past PixelBlueGreenRedReserved8BitPerColor, but diagnostic.c's own Details() ('gop' branch) never logs
+    Mode->Info->PixelFormat at all - checked directly against diagnostic.c, not assumed. Everything else
+    LocationHasValidGop checks (FrameBufferBase/FrameBufferSize nonzero, HorizontalResolution/
+    VerticalResolution nonzero, PixelsPerScanLine >= HorizontalResolution, scanline bytes fitting inside
+    the framebuffer) is checked here from what diagnostic.c does log."""
+    if gop is None or 'width' not in gop:
+        return False  # no GOP at all, or Info was missing/too-small (diagnostic.c logs "gop-info" instead)
+    if not gop['framebuffer'] or not gop['bytes']:
+        return False
+    if not gop['width'] or not gop['height']:
+        return False
+    if gop['stride'] < gop['width']:
+        return False
+    if gop['stride'] * gop['height'] * 4 > gop['bytes']:
+        return False
+    return True
+
+
+def gop_owner_index(c, candidates):
+    """Mirrors app.c's FindTarget/LocationHasValidGop multi-candidate disambiguation (2026-11-04): a GOP
+    handle's own device path is exactly its owning PCI device's path (root+bridge+device, the same prefix
+    pci_device_path() computes) with one extra ACPI ADR node inserted before the END node - confirmed
+    directly against Cancretto's two new 'one card displaying, one idle' captures (2026-11-05, GitHub issue
+    sargentmajord/Windows-GPU-UNLOCK#2), not guessed: in both, the GOP handle's first three path nodes
+    (ACPI root + the two PCI nodes) are byte-for-byte identical to the displaying card's own PCI handle
+    path, and differ from the idle card's. `candidates` is [(index, raw_or_None), ...] where raw is
+    pci_device_path(...)['raw'] (28 bytes: root+bridge+device+its own END) for each targets[index].
+    Returns the single candidate index a sane GOP resolves to, or None if zero or more than one do - the
+    same "refuse rather than guess" outcome FindTarget itself falls back to."""
+    owner = None
+    for h in c.handles.values():
+        if not gop_is_sane(h.gop) or len(h.path) < 3:
+            continue
+        gop_prefix = b''.join(h.path[:-2])  # drop this GOP's own ACPI ADR node + END node
+        matches = {i for i, raw in candidates if raw is not None and raw[:-4] == gop_prefix}
+        if len(matches) != 1:
+            continue  # doesn't resolve to exactly one of our candidates - not a usable signal either way
+        i = next(iter(matches))
+        if owner is not None and owner != i:
+            return None  # a second, different candidate also has a sane GOP - genuinely ambiguous
+        owner = i
+    return owner
+
+
+def disambiguate_multi_target(c):
+    """Only called when probe.c found more than one PCI device matching GuTargets (c.probe_targets ==
+    [len(c.targets)], checked by the caller) - narrows c.targets/c.probe_targets to a single winner in
+    place by GOP ownership, the Python-side mirror of FindTarget's own disambiguation. Leaves c unchanged
+    (so the caller's existing target-count refusal fires as before) if it can't find exactly one owner."""
+    candidates = []
+    for t in c.targets:
+        cfg_t = t.get('cfg')
+        raw = None
+        if cfg_t and len(cfg_t) == 64:
+            device_t, subsystem_t = cfg_t[0], cfg_t[11]
+            th = [h for h in c.handles.values() if h.pci_config and h.pci_location and
+                  h.pci_config[0] == device_t and h.pci_config[11] == subsystem_t and h.pci_location[1] == t['bus']]
+            if len(th) == 1:
+                rpath = pci_device_path(th[0].path)
+                raw = rpath['raw'] if rpath else None
+        candidates.append(raw)
+    owner = gop_owner_index(c, list(enumerate(candidates)))
+    if owner is None:
+        return  # leave c untouched; build_profile's own target-count refusal below handles this
+    chosen = c.targets[owner]
+    c.targets = [chosen]
+    c.probe_targets = [1]
+    # Re-sync every per-target-scoped field parse_capture() attaches (see its own comment on why these
+    # are scoped per target, not shared) onto c's top-level attributes, since build_profile reads those
+    # (c.cfg/c.bar0/c.mmio/c.prom_sha/c.caps), not t[...] - must be the WINNING candidate's own values,
+    # never the other (refused, un-POSTed-or-otherwise-not-chosen) card's.
+    c.cfg = chosen.get('cfg')
+    c.bar0 = chosen.get('bar0')
+    c.mmio = chosen.get('mmio') or {}
+    c.prom_sha = chosen.get('prom_sha')
+    c.caps = chosen.get('caps') or []
 
 
 def gu_targets_from_port_h(port_h_text=None):
@@ -184,13 +301,21 @@ def gu_targets_from_port_h(port_h_text=None):
 def build_profile(c, profile_name, note=''):
     if not c.complete or not c.result_ok:
         refuse('capture-incomplete', 'The capture did not finish cleanly.', 'Run the capture again.')
+    # Mirrors app.c's FindTarget (2026-11-04): more than one PCI device matching GuTargets no longer means
+    # an automatic refusal - try to pick the one actually driving a display first, the same signal
+    # DisplayCheck/TargetGopCheck already rely on at runtime. Only attempted when probe.c's own target
+    # count and the number of probe-target lines actually agree; any other mismatch falls straight through
+    # to the unchanged refusal below rather than guessing.
+    if len(c.targets) > 1 and c.probe_targets == [len(c.targets)]:
+        disambiguate_multi_target(c)
     if c.probe_targets != [1] or len(c.targets) != 1:
         refuse('target-count', 'The diagnostic found %s matching card(s) instead of exactly one.' % (c.probe_targets or 'no'),
-               'Two matching cards are not supported yet.' if c.probe_targets and c.probe_targets[0] > 1 else 'Run the capture again.')
+               'Two matching cards are not supported yet, unless exactly one of them has its own active '
+               'display and the other does not.' if c.probe_targets and c.probe_targets[0] > 1 else 'Run the capture again.')
     t = c.targets[0]
     if t['seg'] != 0 or t['dev'] != 0 or t['fun'] != 0:
         refuse('target-location', 'The target card is not at device 0, function 0 of a PCI bus on segment 0.', 'This layout is not supported.')
-    cfg = c.cfg
+    cfg = t.get('cfg')
     if not cfg or len(cfg) != 64:
         refuse('config-missing', 'The capture has no complete PCI configuration of the target card.', 'Run the capture again.')
     if (cfg[2] >> 24) != 3:

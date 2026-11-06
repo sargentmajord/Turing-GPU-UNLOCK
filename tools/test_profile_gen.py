@@ -17,6 +17,8 @@ import profile_gen as pg  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 RUN01 = REPO / 'tools' / 'captures' / 'run01-cancretto-2080ti-ftw3'
+RUN02 = REPO / 'tools' / 'captures' / 'run02-cancretto-2x2080ti-gpu2-display'
+RUN03 = REPO / 'tools' / 'captures' / 'run03-cancretto-2x2080ti-gpu1-display'
 PORT_H = (REPO / 'internal-boot' / 'unlock' / 'port.h').read_text(encoding='utf-8')
 
 
@@ -133,6 +135,75 @@ class SyntheticAcceptedCard(unittest.TestCase):
         self.assertEqual(values['GU_OTHER_GPU_ROOT_DEVICE'], '0U')
         self.assertEqual(values['GU_OTHER_GPU_ROOT_FUNCTION'], '0U')
         self.assertEqual(values['GU_OTHER_GPU_ADR'], '0x00000000U')
+
+
+class MultiCardOneDisplayDisambiguation(unittest.TestCase):
+    """Real hardware data, 2026-11-05 (GitHub issue sargentmajord/Windows-GPU-UNLOCK#2): both of
+    Cancretto's 2080 Tis installed at once, iGPU disabled, only one card connected to a monitor at a
+    time (swapped between the two captures) - exactly the 'one active, one idle' case PORTING-PLAN.md's
+    'tools/profile_gen.py was deliberately NOT given the matching fix' note said this tool had no real
+    data to verify against. Confirms the Python-side mirror of app.c's FindTarget/LocationHasValidGop
+    disambiguation (added here) actually picks the displaying card, not merely that it stops refusing."""
+
+    def test_picks_gpu2_when_only_gpu2_has_a_display(self):
+        if not (RUN02 / 'DIAG00.TXT').is_file():
+            raise unittest.SkipTest('run02 fixture missing')
+        text = (RUN02 / 'DIAG00.TXT').read_text(encoding='utf-8')
+        cap = pg.parse_capture(text)
+        self.assertEqual(cap.probe_targets, [2])
+        self.assertEqual(sorted(t['bus'] for t in cap.targets), [1, 2])
+        pg.disambiguate_multi_target(cap)
+        self.assertEqual(cap.probe_targets, [1])
+        self.assertEqual(cap.targets[0]['bus'], 2)
+
+    def test_picks_gpu1_when_only_gpu1_has_a_display(self):
+        if not (RUN03 / 'DIAG00.TXT').is_file():
+            raise unittest.SkipTest('run03 fixture missing')
+        text = (RUN03 / 'DIAG00.TXT').read_text(encoding='utf-8')
+        cap = pg.parse_capture(text)
+        self.assertEqual(cap.probe_targets, [2])
+        self.assertEqual(sorted(t['bus'] for t in cap.targets), [1, 2])
+        pg.disambiguate_multi_target(cap)
+        self.assertEqual(cap.probe_targets, [1])
+        self.assertEqual(cap.targets[0]['bus'], 1)
+
+    def test_both_captures_still_correctly_refuse_on_the_pre_existing_memory_register_gap(self):
+        # Disambiguation succeeding is not the same as a usable profile: both these real captures still
+        # hit the exact same 0xbadf5040 "not ready" memory-size sentinel run01's own capture does (see
+        # PORTING-PLAN.md's 2026-11-03 entry) - that gap is independent of this fix and still open, even
+        # on a card confirmed (by this very fix) to actually be the one driving a display.
+        for run in (RUN02, RUN03):
+            if not (run / 'DIAG00.TXT').is_file():
+                raise unittest.SkipTest('fixture missing')
+            text = (run / 'DIAG00.TXT').read_text(encoding='utf-8')
+            f = refused(self, text, 'memory-size-not-ready')
+            self.assertIn('0x1183a4', f.message)
+
+    def test_cfg_bar0_mmio_prom_are_not_mixed_up_between_the_two_real_cards(self):
+        # Regression test for a real bug this fix's own first draft had, caught by actually testing
+        # against these two captures rather than assuming the single-target parsing generalized: cfg/
+        # bar0/mmio/prom-sha were parsed as single, capture-wide values (a flat regex scan of the whole
+        # head, last-match-wins for scalars) - harmless on every capture before this one because none
+        # had more than one probe-target block, but silently capable of attributing one card's own data
+        # to the other the first time a two-target capture existed to expose it (probe.c's own ProbeBar
+        # runs once per matching candidate, so these fields really do repeat once per target - checked
+        # directly against probe.c, not assumed). Mutates only the non-chosen (bus=1) card's own PROM
+        # hash to a value that belongs to neither real card, so a regression back to capture-wide
+        # parsing would leak it into the result instead of the real, chosen (bus=2) card's own hash.
+        if not (RUN02 / 'DIAG00.TXT').is_file():
+            raise unittest.SkipTest('run02 fixture missing')
+        text = (RUN02 / 'DIAG00.TXT').read_text(encoding='utf-8')
+        first_prom = re.search(r'^prom sha256=[0-9a-f]{64}$', text, re.M)
+        fake = 'ab' * 32
+        mutated = text[:first_prom.start()] + 'prom sha256=' + fake + text[first_prom.end():]
+        cap = pg.parse_capture(mutated)
+        self.assertEqual(cap.targets[0]['bus'], 1)
+        self.assertEqual(cap.targets[0]['prom_sha'], fake)       # the corruption landed on bus=1 only
+        self.assertNotEqual(cap.targets[1]['prom_sha'], fake)    # bus=2's own prom is untouched
+        pg.disambiguate_multi_target(cap)
+        self.assertEqual(cap.targets[0]['bus'], 2)                # GOP disambiguation still picks bus=2
+        self.assertNotEqual(cap.prom_sha, fake)                   # the corrupted bus=1 value must not leak through
+        self.assertEqual(cap.prom_sha, '281602497e3c00024dbc44db576d2781071f8b23e811121f728823df7ddedc9a')
 
 
 class Refusals(unittest.TestCase):
