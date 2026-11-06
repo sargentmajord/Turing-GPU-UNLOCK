@@ -22,11 +22,14 @@ BOOLEAN GuTargetConfig(const UINT32 *C, UINTN S, UINTN B, UINTN D, UINTN F) {
    * capture seen so far. Bus number is NOT pinned (changed 2026-11-04, was
    * B != 1): bus numbering is assigned per-motherboard by chipset/slot/BIOS
    * enumeration order, not something that generalizes from one reference
-   * machine - FindTarget (above) already requires exactly one matching PCI
-   * device system-wide (found != 1 fails), so nothing relies on this function
-   * also constraining to a specific bus for safety. A hardcoded bus number here
-   * would have refused a correctly-matching card for a motherboard-specific
-   * reason that has nothing to do with the card itself. */
+   * machine - FindTarget (app.c) already handles having more than one matching
+   * PCI device system-wide (collects every match and disambiguates by which one
+   * has its own active display, rather than requiring exactly one - changed
+   * 2026-11-04; stale here until 2026-11-06, since this comment still described
+   * the pre-change "found != 1 fails" behavior), so nothing relies on this
+   * function also constraining to a specific bus for safety. A hardcoded bus
+   * number here would have refused a correctly-matching card for a
+   * motherboard-specific reason that has nothing to do with the card itself. */
   if (!C || S || D || F || (C[2] >> 24) != 3 || ((C[3] >> 16) & 0x7f)) return FALSE;
   for (I = 0; I < GU_TARGET_COUNT; I++) {
     /* Subsystem 0 in the table (see port.h, changed 2026-11-04) means "any

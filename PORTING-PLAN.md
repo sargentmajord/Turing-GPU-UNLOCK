@@ -787,3 +787,71 @@ touched by this fix.
 system-wide (found != 1 fails)" - stale since `app.c`'s own 2026-11-04 multi-candidate disambiguation
 change, in a file that change didn't touch. Comment-only, no behavior impact either way; left as a known
 loose end rather than editing C source during tonight's specific ask, which was the Python-side fix.
+
+## Stale `port.c` comment fixed; full-checklist review of the first-ever successful real pipeline run (2026-11-06)
+
+**`port.c`'s stale comment, closed.** The loose end flagged just above - `GuTargetConfig`'s own comment
+still describing `FindTarget` as "requires exactly one matching PCI device system-wide" - is fixed:
+corrected to describe the actual 2026-11-04 multi-candidate/GOP-disambiguation behavior, and to note it
+had been stale in the meantime. Comment-only; rebuilt both `build.ps1` modes via the elevated runner
+against a throwaway profile generated from `run02` - exit 0 both, no behavior change, as expected.
+
+**Review ask:** re-run `docs/CODE-REVIEW-CHECKLIST.md` against the actual end-to-end pipeline now that it
+has succeeded for the first time (`run02`'s data: capture -> `profile_gen.py` -> a real compiled preflight
+build) - every prior review pass was done against data that always failed some check first, so nothing
+had ever exercised what a genuine success case reaches. Looked specifically for things only a passing
+profile could expose, not just re-confirming what the test suite already covers.
+
+Traced the actual runtime call order in `app.c`'s `efi_main` (not assumed from reading the function
+definitions in isolation) to check for ordering bugs a synthetic/always-refusing profile would never
+reach: `target` (`FindTarget`) -> `display` (`DisplayCheck`) -> `bar0` (`BarCheck`) -> `prom` (`PromCheck`)
+-> `diagnostic-cold-state` (`ColdCheck`), then `goto finish` unconditionally in a non-`GU_EXPERIMENTAL_
+UNLOCK` build (the exact build Cancretto is being sent). Checked `GuRead32`'s own bounds check
+(`O + 4 > Gu.bar_size`) against this order specifically, since `Gu.bar_size` is only ever set by
+`BarCheck` (zero before it runs): `display` runs before `bar0`, but `DisplayCheck`/`TargetGopCheck` never
+call `GuRead32` (GOP/PCI-protocol calls only), so this is not a bug - confirmed by reading `TargetGopCheck`
+itself, not assumed from the ordering alone. `ColdCheck`'s own `GuRead32(0x100ce0)` (the 2026-11-06 fix)
+correctly runs after `bar0`, every time it's called in the sequence, including after the later driver-
+release/reclaim cycle (`BarCheck` is called again there too, line "`bar0-after-release`") - `Gu.bar_size`
+is never stale when `ColdCheck` reads it.
+
+**Genuinely new finding, not previously true of any build this project has shipped:** the preflight
+binary Cancretto is about to run will be the first time `EFI_PCI_IO_PROTOCOL.GetBarAttributes` - the API
+`BarCheck` uses to validate BAR0's ACPI address-space descriptor (`ResType`, `AddrSpaceGranularity`,
+checksum, the `AddrRangeMax` dual-reading tolerance) - has ever been called against real Turing hardware,
+by anyone. `internal-boot/boot/probe.c`'s own capture tool never calls this API (it only ever used raw
+`Mem.Read`/`Pci.Read`), and this project's own QEmu/OVMF boot-testing (PORTING-PLAN.md, 2026-10-31) was of
+`internal-boot/boot/`, a different binary - `internal-boot/unlock/`'s own `BarCheck` has never been
+boot-tested anywhere, emulated or real, only compiled. This is not a known bug - the ACPI-descriptor logic
+is ported unchanged from Ampere's own, real-hardware-validated `BarCheck` - but it is a genuinely
+unverified assumption this specific preflight run will test for the first time. Worth remembering
+specifically if Cancretto's log shows a `bar0` stage failure: the most likely explanation is this
+assumption not holding on Turing's own EDK2 PciBusDxe behavior, not a problem with his hardware.
+
+**Hand-verified against `run02`'s real captured data for the first time (not previously possible, since
+no real capture had ever produced an accepted profile to check this against):** `checks.c`'s
+`GuCheckConfig` - unreachable by the preflight build sent to Cancretto, but compiled into the
+`-ExperimentalUnlock` build we already verified builds clean against this same real profile. Traced its
+full preliminary gate against `run02`'s actual captured config dwords: command register `0x0003`
+(memory-space on, bus-master off - passes), status register bit 4 set (capabilities list present -
+passes), expansion-ROM enable bit clear (passes), and the capability chain (`0x60`=PMI, `0x68`=MSI,
+`0x78`=PCIe, `0xc8`=MSI-X, matching `profile_gen.py`'s own independently-derived capability offsets
+exactly) walks without hitting any of `GuCheckConfig`'s own overlap/length/duplicate-ID rejections. This
+is the first time this logic has been checked against anything but placeholder/synthetic data; it holds,
+but - same honesty standard as everywhere else in this document - checking it by hand is not the same as
+it actually running on real hardware, which still has not happened.
+
+**Checked and found clean, not just assumed:** `Gu.display_ok`'s role as a pervasive safety gate
+(`GuWrite32`, DMA allocate, FLR, `compat.c`'s busy-check hook) is unaffected by the disambiguation fix or
+the register fix - it is set once per `DisplayCheck` call exactly as before, and the 2026-11-04
+multi-candidate path only affects which single candidate `Gu.pci` ends up pointing at before `DisplayCheck`
+ever runs on it. No interaction bug found between this session's two fixes (GOP-disambiguation,
+memory-register) and this existing gate.
+
+**Net result of this pass:** no code bug found - the stale comment was the only loose end, now closed.
+The two real findings are informational, not fixes: `BarCheck`'s ACPI-descriptor path is about to get its
+first-ever real-hardware exercise, and `checks.c`'s capability-walk logic has now been hand-verified
+consistent with real data for the first time, still pending an actual `-ExperimentalUnlock` run to confirm
+it at runtime. Full test suite re-run clean (25/25) after the comment fix; both `build.ps1` modes rebuilt
+successfully against a real profile both before and after it (unaffected, as expected for a comment-only
+change).
