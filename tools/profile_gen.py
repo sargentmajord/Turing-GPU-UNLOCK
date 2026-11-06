@@ -43,7 +43,21 @@ ESP_NODE_PCI_ROOT_HID = bytes.fromhex('d041030a')   # PNP0A03, same as sargentma
 
 # Registers app.c's ColdCheck reads (see app.c's TU_FEAT_* and GU_GFW_*_OFFSET, gfw_eval.h).
 OFF_CHIP = 0x000000
+# OFF_MEMORY (0x1183a4) was this project's device-memory-size register until 2026-11-06 - ported from
+# Ampere's app.c, where it genuinely is a populated, direct MiB readout (real, hardware-verified there).
+# It reads the known "not finished" 0xbadfxxxx sentinel on every real Turing capture seen so far
+# (run01/02/03), including the two 2026-11-05 captures the GOP-disambiguation fix independently proves
+# were POSTed and actively displaying - an architectural GA10x-vs-TU10x difference at that address, not
+# a timing issue. Kept only for informational logging (see build_profile's summary); OFF_FB_RANGE below
+# is what the check actually uses now.
 OFF_MEMORY = 0x1183a4
+# The real, hardware-verified Turing register for usable framebuffer size: NV_PFB_PRI_MMU_LOCAL_MEMORY_
+# RANGE, read directly out of this project's own pristine, unmodified vendor/unlock.c (its layout step,
+# citing kgspPopulateWprMeta_TU102) and vendor/boot.c's turing_unlock_fb_range_ready() - the real unlock
+# transaction already depends on this exact register for the same purpose. decode_fb_range_mib() below
+# mirrors that decode exactly and must stay byte-for-byte identical to app.c's own TuringUsableFbMib(),
+# or a profile this tool generates could silently stop matching what app.c itself would accept.
+OFF_FB_RANGE = 0x00100ce0
 OFF_PLM = 0x00118128    # GU_GFW_PLM_OFFSET
 OFF_BOOT = 0x00118234   # GU_GFW_BOOT_OFFSET
 OFF_CPUCTL = 0x00110100  # GU_GFW_CPUCTL_OFFSET
@@ -80,6 +94,26 @@ def is_bad_sentinel(value):
     already handled for the GFW registers by gfw_eval.c; app.c's own memory-size read is separate from
     that struct and isn't covered by it (see PORTING-PLAN.md's 2026-11-03 entry) - checked here instead."""
     return (value & 0xffff0000) == 0xbadf0000
+
+
+def decode_fb_range_mib(range_value):
+    """Decode NV_PFB_PRI_MMU_LOCAL_MEMORY_RANGE (OFF_FB_RANGE) into a usable-framebuffer-size-in-MiB
+    integer, or None if the register isn't ready yet. Mirrors app.c's TuringUsableFbMib() and, through
+    it, vendor/boot.c's turing_unlock_fb_range_ready() and vendor/unlock.c's own layout-step decode
+    (mag/scale shift plus the bit-30 ECC-reservation adjustment) exactly - see OFF_FB_RANGE's own
+    comment for why this must stay byte-for-byte identical to the C side. Verified against all three
+    real Turing captures this project has: decodes to exactly 11264 (11 GiB), correct for Cancretto's
+    stock 11GB cards, in every one - run01 (not POSTed) and run02/run03 (confirmed POSTed) alike, unlike
+    the old OFF_MEMORY register this replaced."""
+    if range_value == 0xffffffff or is_bad_sentinel(range_value):
+        return None
+    mag, scale = (range_value >> 4) & 0x3f, range_value & 0xf
+    if not mag:
+        return None  # mirrors turing_unlock_fb_range_ready()'s third condition exactly
+    fb_bytes = mag << (scale + 20)
+    if range_value & (1 << 30):
+        fb_bytes = fb_bytes // 16 * 15
+    return fb_bytes >> 20
 
 
 def pci_device_path(nodes):
@@ -342,7 +376,7 @@ def build_profile(c, profile_name, note=''):
                "itself would refuse it at runtime.")
 
     m = c.mmio
-    for off in (OFF_CHIP, OFF_MEMORY, OFF_PLM, OFF_BOOT, OFF_CPUCTL):
+    for off in (OFF_CHIP, OFF_FB_RANGE, OFF_PLM, OFF_BOOT, OFF_CPUCTL):
         if off not in m:
             refuse('registers-missing', 'The capture is missing register 0x%06x.' % off, 'Run the capture again.')
     # 0xffffffff (every bit set) is the classic PCI/MMIO "nothing is actually responding at this
@@ -370,13 +404,17 @@ def build_profile(c, profile_name, note=''):
     if not (m[OFF_CPUCTL] & CPUCTL_HALTED):
         refuse('gfw-not-halted', 'The GFW falcon is not halted (cpuctl=%#x) - firmware boot has not finished.' % m[OFF_CPUCTL],
                'Run the capture again.')
-    if is_bad_sentinel(m[OFF_MEMORY]):
+    # Fixed 2026-11-06: this used to check OFF_MEMORY (0x1183a4) directly, which reads a "not finished"
+    # sentinel on every real Turing capture regardless of POST state - see OFF_MEMORY's own comment and
+    # PORTING-PLAN.md's 2026-11-06 entry for the full root-cause investigation. OFF_FB_RANGE is the
+    # register Turing's own real unlock transaction actually uses for this.
+    memory_mib = decode_fb_range_mib(m[OFF_FB_RANGE])
+    if memory_mib is None:
         refuse('memory-size-not-ready',
-               'The device-memory-size register (0x%06x) reads %#x, the same "not a finished value" sentinel '
-               'gfw_eval.c already rejects for the GFW registers - it is not covered by that check (it is read '
-               'separately in app.c), so this capture cannot supply a real memory size.' % (OFF_MEMORY, m[OFF_MEMORY]),
-               'Not yet understood whether this register becomes valid later in boot or needs a different read; '
-               'see PORTING-PLAN.md\'s 2026-11-03 entry. Nothing to do differently when capturing right now.')
+               'The usable-framebuffer-size register (0x%06x) reads %#x, which NV_PFB_PRI_MMU_LOCAL_MEMORY_RANGE\'s '
+               'own "not ready" conditions (all-ones, a "not a finished value" sentinel, or a zero magnitude '
+               'field) reject.' % (OFF_FB_RANGE, m[OFF_FB_RANGE]),
+               'Run the capture again.')
     if not c.prom_sha:
         refuse('prom-missing', 'The capture has no video BIOS fingerprint.', 'Run the capture again.')
 
@@ -412,7 +450,7 @@ def build_profile(c, profile_name, note=''):
     values = {
         'GU_PROFILE_NAME': '"%s"' % re.sub(r'[^A-Za-z0-9._-]', '-', profile_name)[:80],
         'GU_BAR0_BASE': '0x%08xULL' % bar0, 'GU_BAR0_END': '0x%08xULL' % (bar0 + 0xffffff),
-        'GU_CHIP_ID': '0x%08xU' % m[OFF_CHIP], 'GU_DEVICE_MEMORY_SIZE': '0x%xU' % m[OFF_MEMORY],
+        'GU_CHIP_ID': '0x%08xU' % m[OFF_CHIP], 'GU_DEVICE_MEMORY_SIZE': '0x%xU' % memory_mib,
         'GU_PROM_SHA256': '"%s"' % c.prom_sha,
         'GU_BOARD_ID': '0x%08xU' % device, 'GU_BOARD_SUBSYSTEM': '0x%08xU' % subsystem,
         'GU_TARGET_BUS': '%dU' % t['bus'], 'GU_CONFIG_CLASS_REV': '0x%08xU' % cfg[2],
@@ -426,8 +464,9 @@ def build_profile(c, profile_name, note=''):
         'target': {'bus': t['bus'], 'id': '%04x:%04x' % (device & 0xffff, device >> 16),
                    'subsystem': '%04x:%04x' % (subsystem & 0xffff, subsystem >> 16),
                    'gu_targets_source': matches[0], 'chip': '0x%08x' % m[OFF_CHIP],
-                   'memory_register': '0x%x' % m[OFF_MEMORY], 'bar0': '0x%08x' % bar0,
-                   'gfw_halted': True},
+                   'memory_mib': memory_mib, 'fb_range_register': '0x%x' % m[OFF_FB_RANGE],
+                   'legacy_unused_memory_register_0x1183a4': '0x%x' % m.get(OFF_MEMORY, 0),
+                   'bar0': '0x%08x' % bar0, 'gfw_halted': True},
         'not_covered': ['GU_OTHER_GPU_* is a compile-time placeholder (no second-adapter capture needed - '
                          'DisplayCheck checks the target card itself, not a separate console adapter) - '
                          'ConfigCheck is GU_EXPERIMENTAL_UNLOCK-gated and unreachable today regardless'],

@@ -108,10 +108,18 @@ static VOID ProbeCaps(CAPTURE *c, EFI_PCI_IO_PROTOCOL *io) {
 
 static VOID ProbeBar(CAPTURE *c, EFI_PCI_IO_PROTOCOL *io, UINT32 bar, EFI_FILE_PROTOCOL *root) {
   /* Every register unlock.c/gfw_eval.h actually reads or writes, cited there rather
-   * than restated as a second, independently-drifting copy: chip id (0x0), device
-   * memory size (0x1183a4), the GFW completion triple (PLM/BOOT/CPUCTL), WPR2 lo/hi
-   * (0x1fa824/0x1fa828), the FB-range and VGA-workspace registers unlock.c's own
-   * layout step reads (0x100ce0/0x625f04), and the TU_FEAT selector/readout block. */
+   * than restated as a second, independently-drifting copy: chip id (0x0), the GFW
+   * completion triple (PLM/BOOT/CPUCTL), WPR2 lo/hi (0x1fa824/0x1fa828), the FB-range
+   * and VGA-workspace registers unlock.c's own layout step reads (0x100ce0/0x625f04 -
+   * this is the real, hardware-verified usable-memory-size source on Turing, decoded
+   * by app.c's TuringUsableFbMib()/tools/profile_gen.py's decode_fb_range_mib(), see
+   * either one's own comment and PORTING-PLAN.md's 2026-11-06 entry), and the TU_FEAT
+   * selector/readout block. 0x1183a4 is also still captured below, purely for
+   * informational logging - it was this project's device-memory-size register until
+   * 2026-11-06, ported from Ampere's app.c (real and populated there), but it reads a
+   * "not finished" sentinel on every real Turing capture seen so far regardless of
+   * POST state - an architectural GA10x-vs-TU10x difference at that address, not
+   * something this capture tool or its reader can fix by reading it differently. */
   static const UINT32 offs[] = {
     0x000000, 0x1183a4, 0x100ce0, 0x118128, 0x118234, 0x110100,
     0x1fa824, 0x1fa828, 0x625f04, 0x409650, 0x409664, 0x40966c, 0x409668

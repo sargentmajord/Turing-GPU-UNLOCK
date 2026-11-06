@@ -30,10 +30,16 @@ def refused(testcase, text, code, **kw):
 
 
 # A synthetic capture built from the real one: mutated to match an actual GuTargets row (device/subsystem
-# only - nothing about the card's own real, as-captured hardware state) and to clear the memory-size
-# register's "not ready" sentinel this capture happened to show (see PORTING-PLAN.md's 2026-11-03 entry).
-# Everything else - the device path shape, the register values, the PROM hash - is genuinely from real
-# hardware. This is what first proved build.ps1 actually compiles against a non-TEMPLATE profile at all.
+# only - nothing about the card's own real, as-captured hardware state). Everything else - the device
+# path shape, the register values, the PROM hash - is genuinely from real hardware. This is what first
+# proved build.ps1 actually compiles against a non-TEMPLATE profile at all.
+#
+# Until 2026-11-06 this also cleared the (then-checked) OFF_MEMORY register's "not ready" sentinel
+# (PORTING-PLAN.md's 2026-11-03 entry) - no longer needed: OFF_FB_RANGE (the register the check now
+# actually uses) already reads a ready, correct value in run01's own real, unmutated capture, including
+# before this function's device/subsystem swap. Confirmed directly, not assumed, by running
+# build_profile() against RUN01's raw text with no mutation at all (see RealCapture's own
+# test_device_id_is_now_accepted_and_produces_a_working_profile) - it now succeeds on its own.
 def synthetic_accepted_text():
     text = (RUN01 / 'DIAG00.TXT').read_text(encoding='utf-8')
     original = pg.parse_capture(text)
@@ -50,18 +56,17 @@ def synthetic_accepted_text():
         dwords = m[1].split()      # dwords[0] is overall dword index 1 (device is dword 0, already matched)
         dwords[10] = new_subsystem  # overall dword index 11 = dwords[10]
         text = text[:m.start()] + prefix + new_device + ' ' + ' '.join(dwords) + text[m.end():]
-
-    text = re.sub(r'^mmio off=0x001183a4 status=0x0+ value=0x[0-9a-f]+$',
-                  'mmio off=0x001183a4 status=0x0000000000000000 value=0x00003000', text, count=1, flags=re.M)
     return text
 
 
 class RealCapture(unittest.TestCase):
     """Against Cancretto's actual, unmutated capture - a stock card, in GuTargets' device-id family
-    since 2026-11-04 (see port.h), but still refused: this specific capture was taken with the iGPU as
-    boot-primary, so the card was never POSTed and several registers - memory size here, PROM hash
-    elsewhere (PORTING-PLAN.md's "DisplayCheck: what the captures actually showed") - read un-POSTed
-    values rather than real ones. Refused for that reason now, not for being a stock card."""
+    since 2026-11-04 (see port.h). Produces a working profile since 2026-11-06 (the OFF_FB_RANGE fix,
+    see PORTING-PLAN.md's entry on that date) - before that, this capture was refused on the old,
+    wrong OFF_MEMORY register, which reads an un-POSTed value here (this capture's iGPU was
+    boot-primary, so the card itself was never POSTed - see PORTING-PLAN.md's "DisplayCheck: what the
+    captures actually showed"); OFF_FB_RANGE doesn't depend on POST state the way OFF_MEMORY seemed to
+    and reads the correct 11264 MiB regardless."""
 
     @classmethod
     def setUpClass(cls):
@@ -86,18 +91,24 @@ class RealCapture(unittest.TestCase):
         self.assertFalse(pg.is_bad_sentinel(self.cap.mmio[pg.OFF_PLM]))
         self.assertTrue(self.cap.mmio[pg.OFF_CPUCTL] & pg.CPUCTL_HALTED)
 
-    def test_memory_register_is_the_known_not_ready_sentinel(self):
-        # The actual, as-captured finding this tool exists partly to record precisely - see
-        # PORTING-PLAN.md's 2026-11-03 entry. Not a parsing bug: this is genuinely what the register read.
+    def test_legacy_off_memory_register_still_reads_the_not_ready_sentinel(self):
+        # OFF_MEMORY (0x1183a4) is no longer what the real check uses (see OFF_FB_RANGE's own comment,
+        # PORTING-PLAN.md's 2026-11-06 entry) - kept only for informational logging now. This capture's
+        # own un-POSTed state is exactly why that register looked like a POST-timing problem for a
+        # while: it genuinely does read the sentinel here. Recorded so the historical reasoning in
+        # PORTING-PLAN.md stays checkable against real data, not just prose.
         self.assertTrue(pg.is_bad_sentinel(self.cap.mmio[pg.OFF_MEMORY]))
 
-    def test_device_id_is_now_accepted_but_capture_still_refused_on_memory_register(self):
-        # Changed 2026-11-04: device-id alone is enough to pass GuTargets now (port.h), so this capture
-        # gets past the old 'not-a-target-card' refusal and hits the real, pre-existing problem instead -
-        # see test_memory_register_is_the_known_not_ready_sentinel above. Confirms the two findings are
-        # the same root cause (card not POSTed), not a regression from broadening the device match.
-        f = refused(self, self.text, 'memory-size-not-ready')
-        self.assertIn('0x1183a4', f.message)
+    def test_device_id_is_now_accepted_and_produces_a_working_profile(self):
+        # Changed 2026-11-04: device-id alone is enough to pass GuTargets now (port.h). Changed again
+        # 2026-11-06: the OFF_FB_RANGE fix means this capture - the very first real one this project
+        # ever got, un-POSTed and all - produces a usable profile. OFF_FB_RANGE (0x100ce0) reads 11264
+        # MiB here even though this card was never POSTed, confirming the old "needs POST first" theory
+        # (PORTING-PLAN.md's 2026-11-03 entry) was never the real explanation - the old register
+        # (OFF_MEMORY) was just the wrong one, on every capture including this one.
+        values, summary = pg.build_profile(pg.parse_capture(self.text), 'test')
+        self.assertEqual(values['GU_DEVICE_MEMORY_SIZE'], '0x2c00U')
+        self.assertEqual(summary['target']['memory_mib'], 11264)
 
     def test_gu_targets_from_port_h_finds_the_real_table(self):
         rows = pg.gu_targets_from_port_h()
@@ -137,6 +148,35 @@ class SyntheticAcceptedCard(unittest.TestCase):
         self.assertEqual(values['GU_OTHER_GPU_ADR'], '0x00000000U')
 
 
+class DecodeFbRangeMib(unittest.TestCase):
+    """Pure-function tests for decode_fb_range_mib() (2026-11-06 fix) - the Python mirror of app.c's
+    TuringUsableFbMib(), which itself mirrors vendor/unlock.c's own layout-step decode and vendor/
+    boot.c's turing_unlock_fb_range_ready(). These don't need a real capture - they pin the formula
+    itself, independent of real_capture_values which only exercises the one value Cancretto's cards
+    happen to produce (0x2c8 -> 11264)."""
+
+    def test_the_real_captured_value_decodes_to_11_gib(self):
+        self.assertEqual(pg.decode_fb_range_mib(0x2c8), 11264)
+
+    def test_not_ready_conditions_all_return_none(self):
+        self.assertIsNone(pg.decode_fb_range_mib(0xffffffff))      # unmapped/all-ones
+        self.assertIsNone(pg.decode_fb_range_mib(0xbadf0000))      # bad-sentinel pattern
+        self.assertIsNone(pg.decode_fb_range_mib(0xbadf1234))      # bad-sentinel, non-zero low bits
+        self.assertIsNone(pg.decode_fb_range_mib(0x00000008))      # mag field is 0 (bits 4-9 of value)
+
+    def test_ecc_reservation_bit_30_reduces_by_one_sixteenth(self):
+        # Same adjustment vendor/unlock.c applies: fb_bytes = fb_bytes / 16 * 15 when bit 30 is set.
+        without_ecc = pg.decode_fb_range_mib(0x2c8)
+        with_ecc = pg.decode_fb_range_mib(0x2c8 | (1 << 30))
+        self.assertEqual(with_ecc, without_ecc // 16 * 15)
+        self.assertEqual(with_ecc, 10560)  # 11264 / 16 * 15
+
+    def test_a_small_but_nonzero_magnitude_still_decodes(self):
+        # mag=1, scale=0 -> 1 << 20 = 1 MiB - not a realistic card, but confirms the formula doesn't
+        # special-case small values as "not ready" the way all-ones/bad-sentinel/mag-zero are.
+        self.assertEqual(pg.decode_fb_range_mib(0x10), 1)
+
+
 class MultiCardOneDisplayDisambiguation(unittest.TestCase):
     """Real hardware data, 2026-11-05 (GitHub issue sargentmajord/Windows-GPU-UNLOCK#2): both of
     Cancretto's 2080 Tis installed at once, iGPU disabled, only one card connected to a monitor at a
@@ -167,17 +207,21 @@ class MultiCardOneDisplayDisambiguation(unittest.TestCase):
         self.assertEqual(cap.probe_targets, [1])
         self.assertEqual(cap.targets[0]['bus'], 1)
 
-    def test_both_captures_still_correctly_refuse_on_the_pre_existing_memory_register_gap(self):
-        # Disambiguation succeeding is not the same as a usable profile: both these real captures still
-        # hit the exact same 0xbadf5040 "not ready" memory-size sentinel run01's own capture does (see
-        # PORTING-PLAN.md's 2026-11-03 entry) - that gap is independent of this fix and still open, even
-        # on a card confirmed (by this very fix) to actually be the one driving a display.
-        for run in (RUN02, RUN03):
+    def test_both_captures_now_produce_a_working_profile(self):
+        # Until 2026-11-06 disambiguation succeeding was not the same as a usable profile: both these
+        # real captures hit the same 0xbadf5040 "not ready" sentinel run01's own capture did, on what
+        # turned out to be the wrong register (OFF_MEMORY, 0x1183a4) - see PORTING-PLAN.md's 2026-11-06
+        # root-cause entry. OFF_FB_RANGE (0x100ce0), the register Turing's own real unlock transaction
+        # actually uses, reads a ready, correct 11264 MiB on both, on the card each one's own
+        # disambiguation picks - the first real captures this project has that produce ok: true.
+        for run, expected_bus in ((RUN02, 2), (RUN03, 1)):
             if not (run / 'DIAG00.TXT').is_file():
                 raise unittest.SkipTest('fixture missing')
             text = (run / 'DIAG00.TXT').read_text(encoding='utf-8')
-            f = refused(self, text, 'memory-size-not-ready')
-            self.assertIn('0x1183a4', f.message)
+            values, summary = pg.build_profile(pg.parse_capture(text), 'test')
+            self.assertEqual(summary['target']['bus'], expected_bus)
+            self.assertEqual(summary['target']['memory_mib'], 11264)
+            self.assertEqual(values['GU_DEVICE_MEMORY_SIZE'], '0x2c00U')
 
     def test_cfg_bar0_mmio_prom_are_not_mixed_up_between_the_two_real_cards(self):
         # Regression test for a real bug this fix's own first draft had, caught by actually testing
@@ -241,9 +285,13 @@ class Refusals(unittest.TestCase):
     def test_gfw_not_halted(self):
         refused(self, self.mutate(r'^(mmio off=0x00110100 status=0x0+ value=)0x[0-9a-f]+$', r'\g<1>0x00000000'), 'gfw-not-halted')
 
-    def test_memory_register_still_not_ready_is_refused_not_baked_in(self):
-        f = refused(self, self.mutate(r'^(mmio off=0x001183a4 status=0x0+ value=)0x[0-9a-f]+$', r'\g<1>0xbadf0000'), 'memory-size-not-ready')
-        self.assertIn('0x1183a4', f.message)
+    def test_fb_range_register_not_ready_is_refused_not_baked_in(self):
+        # OFF_FB_RANGE (0x100ce0), not the old OFF_MEMORY (0x1183a4) - see PORTING-PLAN.md's 2026-11-06
+        # entry. All three of turing_unlock_fb_range_ready()'s own conditions, mirrored here:
+        f = refused(self, self.mutate(r'^(mmio off=0x00100ce0 status=0x0+ value=)0x[0-9a-f]+$', r'\g<1>0xbadf0000'), 'memory-size-not-ready')
+        self.assertIn('0x100ce0', f.message)
+        refused(self, self.mutate(r'^(mmio off=0x00100ce0 status=0x0+ value=)0x[0-9a-f]+$', r'\g<1>0xffffffff'), 'memory-size-not-ready')
+        refused(self, self.mutate(r'^(mmio off=0x00100ce0 status=0x0+ value=)0x[0-9a-f]+$', r'\g<1>0x00000008'), 'memory-size-not-ready')  # mag=0
 
     def test_prom_missing(self):
         refused(self, self.mutate(r'^prom sha256=.*$', ''), 'prom-missing')

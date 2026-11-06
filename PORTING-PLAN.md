@@ -597,6 +597,82 @@ already fixed in that commit - found four more, by actually testing rather than 
    *kind* of card eligible, it did not create a working profile from data that was never going to produce
    one.
 
+## Root cause found and fixed: ColdCheck/profile_gen.py were reading the wrong memory-size register (2026-11-06)
+
+Investigated why the memory-size register still read the `0xbadf5040` sentinel on both of Cancretto's
+2026-11-05 captures even after the GOP-disambiguation fix independently proved the chosen card was
+genuinely POSTed and actively displaying - disproving the "it's just not POSTed yet" theory the
+2026-11-05 entry above left open. Followed `docs/CODE-REVIEW-CHECKLIST.md` throughout: grepped the
+whole repo for every reference to this register/sentinel first (item 1), used the three real captures
+as ground truth rather than theorizing (item 3/4), and checked git history rather than assuming the
+register was ever Turing-verified.
+
+**Root cause, found by `git log -p`/`git show` on the commit that introduced it (`4c99101`,
+2026-10-31), not assumed:** `app.c`'s `ColdCheck` reads register `0x1183a4` directly and compares it
+by exact equality to `GU_DEVICE_MEMORY_SIZE` - a direct, uncited port from Ampere's own `app.c`, with
+only "the register offsets ... swapped to Turing's" (the commit's own words) never actually checked for
+this specific register. On GA10x (Ampere) that offset genuinely is a populated, direct-MiB readout -
+confirmed real and hardware-verified by `Windows-GPU-UNLOCK`'s own `app.c`/`vendor/unlock_610.c` (which
+labels it `mb`/`fb_mb` and cites NVIDIA's own `kgspPopulateWprMeta_TU102` function name) using it the
+same way in production, on the one real Ampere reference machine, where it reads `0x3000` (12288 MiB,
+exactly the 3060's real 12 GB). On every real Turing capture this project has, that same offset instead
+reads the known "not a finished value" `0xbadfxxxx` sentinel - including both 2026-11-05 captures on a
+card now independently confirmed POSTed and displaying. This is an architectural GA10x-vs-TU10x
+difference at that address, not a timing/POST issue at all - `0x1183a4` simply never becomes ready on
+Turing, regardless of anything a capture can control.
+
+**The real register, found in this project's own pristine, unmodified `vendor/unlock.c` (nlzy/turing-
+unlock's real, hardware-tested Linux kernel module) - not guessed at:** `unlock_transaction_layout`'s
+equivalent step (lines ~819-854) computes usable framebuffer size from `NV_PFB_PRI_MMU_LOCAL_MEMORY_
+RANGE` (`0x100ce0`), citing the same `kgspPopulateWprMeta_TU102` function Ampere's own code does, via a
+packed `mag`/`scale` encoding (`fb_bytes = mag << (scale + 20)`, halved-by-a-sixteenth if bit 30 - an
+ECC reservation flag - is set), gated by `vendor/boot.c`'s own `turing_unlock_fb_range_ready()` (rejects
+all-ones, the same `0xbadfxxxx` sentinel, or a zero magnitude field). `internal-boot/boot/probe.c` was
+already capturing this register defensively (its own header comment already cited it, just mislabeled
+as a separate, different-purpose "FB-range... layout step" register, never connected to the "device
+memory size" concept `0x1183a4` was assumed to cover) - nothing needed to change there except the
+comment. Decoded from all three real captures (`tools/captures/run01/02/03`, register value `0x2c8` in
+every one): **exactly 11264 MiB (11 GiB)** - correct for Cancretto's stock 11GB cards, and unlike
+`0x1183a4`, ready in all three regardless of POST state, including `run01`'s own un-POSTed capture.
+
+**Fixed, checked against real data at every step, not assumed to generalize:**
+- `app.c`: added `TuringUsableFbMib()`, a direct port of the decode above; `ColdCheck` now reads
+  `0x100ce0` and compares its decoded MiB value to `GU_DEVICE_MEMORY_SIZE` instead of reading `0x1183a4`
+  directly. The old register is still read and logged (`legacy_unused_0x1183a4=`) for continuity, not
+  used for anything.
+- `tools/profile_gen.py`: added `OFF_FB_RANGE`/`decode_fb_range_mib()`, a byte-for-byte Python mirror of
+  the C decode (same caution as every other place this project keeps two independent copies of the same
+  logic in sync - checklist item 5) - must stay identical or a profile this tool generates could stop
+  matching what `app.c` itself would accept. `GU_DEVICE_MEMORY_SIZE` is now generated as MiB decoded
+  from `OFF_FB_RANGE`, not the raw `OFF_MEMORY` value.
+- `profiles/TEMPLATE/profile.h`: comment on `GU_DEVICE_MEMORY_SIZE` corrected to describe what it
+  actually is now.
+- `internal-boot/boot/probe.c`: corrected the stale comment that originally mislabeled `0x1183a4` as
+  "device memory size" separately from the "FB-range... layout step" register - the exact mislabeling
+  that let this bug go unnoticed as long as it did.
+- `tools/test_profile_gen.py`: fixed the three tests that were asserting the old, now-wrong "still
+  refused" behavior (two of them - `RealCapture`'s and `MultiCardOneDisplayDisambiguation`'s - now
+  assert the capture produces a working profile instead); added `DecodeFbRangeMib`, direct pure-function
+  tests for the new decode covering all three "not ready" conditions and the bit-30 ECC adjustment,
+  independent of real-capture data. Full suite: 25/25 (was 21).
+
+**Result: all three real captures now produce `ok: true`** - `run01` (Cancretto's very first, un-POSTed
+single-card capture), `run02` and `run03` (2026-11-05, GOP-disambiguation correctly picking bus 2 and
+bus 1 respectively) all generate a complete profile, the first time any real Turing capture this
+project has ever had has produced one. Rebuilt via the elevated runner: both `build.ps1` modes against
+a real profile generated from `run02` (not a synthetic/throwaway fixture, for the first time) - exit 0
+both - and `internal-boot/boot/build-diagnostic.ps1` (the probe.c comment-only change) - exit 0. The
+generated `profile.h` itself was discarded after the build, per this project's own "describes one PC,
+never committed" rule for real profiles.
+
+**Honesty note, since this is exactly the kind of result to not overstate:** this confirms `ColdCheck`
+(preflight) would now accept a real profile built from real captured registers, and that compilation/
+linking against real data works end to end - it is NOT a claim that the unlock transaction itself is
+safe, validated, or ready to run on real hardware. Nothing about `GU_EXPERIMENTAL_UNLOCK`'s own gating
+(`turing_unlock_gfw_assess`, `Gu.prom_verified`, etc.) changed, and running the actual unlock transaction
+on real hardware remains the separate, later, higher-stakes step it always was - this fix only concerns
+whether a profile can be *built* and whether the preflight gate would *accept* it.
+
 ## Standing code-review checklist added (2026-11-04)
 
 In direct response to real misses this session (caught by the user, not by a review pass that should have

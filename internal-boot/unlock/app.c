@@ -206,25 +206,51 @@ static EFI_STATUS PromCheck(VOID) {
   GuFree(prom); Gu.prom_verified = good; GuLog("live PROM hash matched=%u\n", (unsigned)good);
   return good ? EFI_SUCCESS : EFI_CRC_ERROR;
 }
-/* Chip id, device memory size and "has the firmware finished booting" are generic,
- * profile-driven checks - turing_unlock_gfw_assess() already encapsulates exactly
- * what "finished" means (PLM level-0, boot byte 0xff, CPUCTL halted) without this
- * file needing to know Turing's own exact cold-boot register values, which nobody
- * has captured yet. Deliberately NOT gating on an expected cold SS0/SS1 value the
- * way Ampere's ColdCheck does (its GU_STOCK_PROFILE_SS0/GU_ENTRY_LATCHED machinery
- * is itself the product of real-hardware research this project has none of yet -
- * see PORTING-PLAN.md's note on not copying that speculatively). SS0/SS1 are only
- * logged here for visibility; nothing is gated on their value until a real capture
- * says what a genuinely cold Turing card's selectors actually read. */
+/* Device memory size - fixed 2026-11-06, was reading the wrong register. This file used to read
+ * 0x1183a4 directly (ported from Ampere's app.c, which genuinely works there - GA10x's own 0x1183a4
+ * really is a populated, direct MiB readout, confirmed by Windows-GPU-UNLOCK's own real-hardware-
+ * verified app.c/unlock_610.c using it the same way). On every real Turing capture this project has
+ * (tools/captures/run01/02/03) that register instead reads the known "not finished yet" 0xbadfxxxx
+ * sentinel - including run02/run03 (2026-11-05), where the GOP-disambiguation fix independently
+ * proves the card was genuinely POSTed and actively displaying. Checked directly, not guessed: this
+ * is an architectural difference between GA10x and TU10x at that address, not a timing issue - 0x1183a4
+ * never becomes ready on Turing regardless of POST/display state. The real, hardware-verified register
+ * for Turing is NV_PFB_PRI_MMU_LOCAL_MEMORY_RANGE (0x100ce0): read directly out of this project's own
+ * pristine, unmodified vendor/unlock.c (its layout step, citing kgspPopulateWprMeta_TU102) and
+ * vendor/boot.c's turing_unlock_fb_range_ready() - the real unlock transaction already depends on this
+ * exact register for the same purpose; probe.c was already capturing it defensively, nobody had wired
+ * it into this check. TuringUsableFbMib() mirrors vendor/unlock.c's own mag/scale decode (including the
+ * bit-30 ECC-reservation adjustment) byte-for-byte - must stay identical to tools/profile_gen.py's own
+ * copy of this same formula, or a profile this file accepts could silently stop matching one
+ * tools/profile_gen.py would generate. Decodes to exactly 11264 MiB (11 GiB) on all three real
+ * captures - correct for Cancretto's stock 11GB cards, and, unlike 0x1183a4, consistently ready. */
+static UINT32 TuringUsableFbMib(UINT32 range) {
+  if (range == 0xffffffffu || (range & 0xffff0000u) == 0xbadf0000u) return 0;
+  UINT32 mag = (range >> 4) & 0x3fu, scale = range & 0xfu;
+  if (!mag) return 0;  /* mirrors turing_unlock_fb_range_ready()'s third condition exactly */
+  UINT64 fb_bytes = (UINT64)mag << (scale + 20);
+  if (range & (1u << 30)) fb_bytes = fb_bytes / 16 * 15;
+  return (UINT32)(fb_bytes >> 20);
+}
+/* Chip id and "has the firmware finished booting" are generic, profile-driven checks -
+ * turing_unlock_gfw_assess() already encapsulates exactly what "finished" means (PLM level-0, boot
+ * byte 0xff, CPUCTL halted) without this file needing to know Turing's own exact cold-boot register
+ * values, which nobody has captured yet. Deliberately NOT gating on an expected cold SS0/SS1 value the
+ * way Ampere's ColdCheck does (its GU_STOCK_PROFILE_SS0/GU_ENTRY_LATCHED machinery is itself the
+ * product of real-hardware research this project has none of yet - see PORTING-PLAN.md's note on not
+ * copying that speculatively). SS0/SS1 are only logged here for visibility; nothing is gated on their
+ * value until a real capture says what a genuinely cold Turing card's selectors actually read. */
 static EFI_STATUS ColdCheck(VOID) {
   Gu.profile_verified = FALSE;
   UINT32 chip = GuRead32(0);
   struct turing_unlock_gfw_sample s = { .config_ok = true, .plm = GuRead32(GU_GFW_PLM_OFFSET),
     .boot = GuRead32(GU_GFW_BOOT_OFFSET), .cpuctl = GuRead32(GU_GFW_CPUCTL_OFFSET) };
   UINT32 wpr_hi = GuRead32(0x1fa828), ss0 = GuRead32(TU_FEAT_SS0), ss1 = GuRead32(TU_FEAT_SS1);
-  UINT32 memory = GuRead32(0x1183a4);
-  GuLog("cold state: chip=%#x boot_state=%#x gfw=%#x/%#x/%#x WPR2_HI=%#x SS0=%#x SS1=%#x memory=%#x\n",
-    chip, GuRead32(0x1180f8), s.plm, s.boot, s.cpuctl, wpr_hi, ss0, ss1, memory);
+  UINT32 fb_range = GuRead32(0x100ce0);
+  UINT32 memory = TuringUsableFbMib(fb_range);
+  GuLog("cold state: chip=%#x boot_state=%#x gfw=%#x/%#x/%#x WPR2_HI=%#x SS0=%#x SS1=%#x "
+    "fb_range=%#x memory_mib=%#x legacy_unused_0x1183a4=%#x\n",
+    chip, GuRead32(0x1180f8), s.plm, s.boot, s.cpuctl, wpr_hi, ss0, ss1, fb_range, memory, GuRead32(0x1183a4));
 #if !defined(GU_EXPERIMENTAL_UNLOCK)
   GuLog("DIAGNOSTIC PREFLIGHT ONLY: chip baseline=UNKNOWN memory=%#x expected=%#x; cannot arm; no GPU writes/reset/DMA/driver release\n", memory, GU_DEVICE_MEMORY_SIZE);
   return Gu.fault ? EFI_DEVICE_ERROR : EFI_NOT_READY;

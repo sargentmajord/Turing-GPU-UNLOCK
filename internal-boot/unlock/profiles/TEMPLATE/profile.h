@@ -82,7 +82,11 @@
 #define GU_BAR0_BASE 0x00000000ULL     /* placeholder - from the real capture, not assumed */
 #define GU_BAR0_END 0x00000000ULL      /* placeholder - BAR0 is a 16 MiB aperture on both GA10x and TU10x, but its base address is assigned per-system */
 #define GU_CHIP_ID 0x00000000U         /* placeholder - the card's cold-state chip id read at register offset 0 */
-#define GU_DEVICE_MEMORY_SIZE 0x0000U  /* placeholder - cold-state value at register offset 0x1183a4 */
+#define GU_DEVICE_MEMORY_SIZE 0x0000U  /* placeholder - usable framebuffer size in MiB, decoded from
+   NV_PFB_PRI_MMU_LOCAL_MEMORY_RANGE (register offset 0x100ce0, see app.c's TuringUsableFbMib() and its
+   own comment) - NOT a direct register value and NOT register offset 0x1183a4, which this project used
+   until 2026-11-06: that offset is populated on GA10x (Ampere) but reads a "not finished" sentinel on
+   every real Turing capture seen so far, POSTed or not. */
 #define GU_PROM_SHA256 "0000000000000000000000000000000000000000000000000000000000000000" /* placeholder - SHA-256 of this exact card's own 1 MiB expansion ROM image */
 #define GU_ROOT_PORT_DEVICE 0U /* placeholder */
 #define GU_ROOT_PORT_FUNCTION 0U /* placeholder */
