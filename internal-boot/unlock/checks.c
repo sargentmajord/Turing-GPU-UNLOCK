@@ -1,9 +1,12 @@
-/* Turing GPU UNLOCK - Windows UEFI port. Copied unchanged from
+/* Turing GPU UNLOCK - Windows UEFI port. Adapted from
    sargentmajord/Windows-GPU-UNLOCK's internal-boot/unlock/checks.c
    (GPL-2.0-only); see THIRD_PARTY_NOTICES.md. This logic (PCI capability-chain
-   walking, GU_BOARD_ID/GU_TARGET_BUS/etc. checked against whatever profile.h
+   walking, GU_BOARD_ID/etc. checked against whatever profile.h
    supplies) is not Ampere-specific - it's generic PCI config-space validation
-   parameterized entirely by machine-profile.h, the same way for any chip. */
+   parameterized entirely by machine-profile.h, the same way for any chip.
+   No longer byte-for-byte unchanged as of 2026-11-10: the bus-number pin
+   (GuCheckConfig's own copy of a constraint port.c's FindTarget already
+   dropped on 2026-11-04) was removed - see GuCheckConfig's own comment. */
 #include "checks.h"
 #include "machine-profile.h"
 #include <IndustryStandard/Pci.h>
@@ -33,8 +36,19 @@ BOOLEAN GuCheckConfig(const UINT32 Config[64], UINTN Segment, UINTN Bus,
 
   if (Out == NULL) return FALSE;
   *Out = Caps;
-  if (Config == NULL || Segment != 0 || Bus != GU_TARGET_BUS || Device != 0 || Function != 0)
+  /* Bus is no longer pinned to GU_TARGET_BUS (fixed 2026-11-10, same reasoning as app.c's BarCheck/
+   * ColdCheck): bus numbering is assigned per-motherboard by chipset/slot/BIOS enumeration order, not
+   * a fact about the card itself - port.c's own GuTargetConfig/FindTarget already stopped pinning bus
+   * for exactly this reason back on 2026-11-04, but this file (copied unchanged from Ampere's own
+   * checks.c, see THIRD_PARTY_NOTICES.md) kept an independent, duplicate pin the rest of this port had
+   * already moved past - another case of the same logic existing in two places and only one getting
+   * updated. Segment/Device/Function are left pinned to 0: those are a real PCI topology invariant for
+   * a discrete GPU's own primary function, true across every real capture seen so far, not a
+   * per-machine fact that needs a prior capture to know. Bus itself is accepted as whatever ConfigCheck
+   * (app.c) already resolved live via GetLocation() and is passing in here. */
+  if (Config == NULL || Segment != 0 || Device != 0 || Function != 0)
     return FALSE;
+  (VOID)Bus;
   if (Config[0] != GU_BOARD_ID || Config[0x2c / 4] != GU_BOARD_SUBSYSTEM ||
       ConfigByte(Config, 0x0b) != PCI_CLASS_DISPLAY ||
       (ConfigByte(Config, PCI_HEADER_TYPE_OFFSET) & 0x7fU) != HEADER_TYPE_DEVICE)

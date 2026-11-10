@@ -179,9 +179,18 @@ static EFI_STATUS BarCheck(VOID) {
       GuLog("bar0 descriptor: type=%u granularity=%llu min=%#llx max=%#llx length=%#llx translation=%#llx\n",
         (unsigned)r->ResType, (unsigned long long)r->AddrSpaceGranularity, (unsigned long long)r->AddrRangeMin,
         (unsigned long long)r->AddrRangeMax, (unsigned long long)r->AddrLen, (unsigned long long)r->AddrTranslationOffset);
+    /* Live-detected, not profile-pinned - fixed 2026-11-10. GuRead32/GuWrite32/GuCopyFromIo never use
+     * Gu.bar_base as a raw pointer anyway (they all go through Gu.pci->Mem.Read/Write with BarIndex=0,
+     * which the firmware itself resolves to the real BAR0 address) - checked directly, not assumed, by
+     * tracing every caller. The actual BAR0 base address was only ever needed here as an exact-match
+     * cross-check against a specific prior capture (GU_BAR0_BASE/GU_BAR0_END), which is what forced
+     * anyone running this build to have sent a capture from THIS EXACT machine first. Replaced with a
+     * self-consistency check (AddrRangeMax really is AddrRangeMin+0xffffff, the 16 MiB aperture both
+     * GA10x and TU10x expose, matching the EDK2 alternate reading already tolerated) - everything else
+     * here (ResType/AddrLen/AddrSpaceGranularity/checksum/end-tag) was already profile-independent. */
     if (!r || r->Desc != ACPI_ADDRESS_SPACE_DESCRIPTOR || r->Len != sizeof(*r) - 3 || r->ResType != 0 ||
-      r->AddrRangeMin != GU_BAR0_BASE || r->AddrLen != 0x1000000 || r->AddrTranslationOffset ||
-      (r->AddrRangeMax != GU_BAR0_END && r->AddrRangeMax != 0x00ffffff) ||
+      r->AddrLen != 0x1000000 || r->AddrTranslationOffset ||
+      (r->AddrRangeMax != r->AddrRangeMin + 0xffffff && r->AddrRangeMax != 0x00ffffff) ||
       r->AddrSpaceGranularity != 32 || ((UINT8 *)(r + 1))[0] != ACPI_END_TAG_DESCRIPTOR) status = EFI_UNSUPPORTED;
     else {
       UINT8 *raw = (UINT8 *)r, sum = 0;
@@ -261,8 +270,19 @@ static EFI_STATUS ColdCheck(VOID) {
    * ever starting a transaction (wpr_hi>>4 nonzero, or boot_state's top 12 bits
    * set) - checked again here as a second, independent layer before arming, not
    * because unlock.c's own check is trusted any less. */
-  if (chip != GU_CHIP_ID || memory != GU_DEVICE_MEMORY_SIZE || turing_unlock_gfw_assess(&s) ||
-    (wpr_hi >> 4) || !Gu.prom_verified)
+  /* Live sanity checks, not profile-pinned exact matches - fixed 2026-11-10, same reasoning as
+   * BarCheck above. `memory` is already 0 precisely when TuringUsableFbMib() judged the live register
+   * not ready (all-ones/bad-sentinel/zero-magnitude) - that readiness check IS the real safety
+   * property; comparing the decoded value to a specific prior capture's number added nothing beyond
+   * requiring that capture to exist first. `chip` has no equivalent readiness function (nothing else
+   * in this file validates it), so it gets the same unmapped/bad-sentinel/zero rejection gfw_eval.c
+   * already applies to the GFW triple, inlined here rather than pinned to GU_CHIP_ID: this project has
+   * exactly two real data points for this register (both of Cancretto's cards, same SKU, both reading
+   * 0x162000a1) and zero for GuTargets' other accepted device id (10de:1e04, documented in README.md's
+   * own "Known validation gap" table as a different variant) - hardcoding either value as "the"
+   * correct TU102 chip id would be a guess this project has no evidence for, not a verified fact. */
+  if (!chip || chip == 0xffffffffu || (chip & 0xffff0000u) == 0xbadf0000u || !memory ||
+    turing_unlock_gfw_assess(&s) || (wpr_hi >> 4) || !Gu.prom_verified)
     return EFI_NOT_READY;
   Gu.profile_verified = TRUE;
   GuLog("EXPERIMENTAL exact-card profile %s verified; SS0=%#x SS1=%#x observed, not gated on - no real cold-state capture exists yet; hardware untested.\n",
@@ -360,8 +380,13 @@ static EFI_STATUS ConfigCheck(BOOLEAN Save) {
   if (EFI_ERROR(status)) return status;
   status = ReadConfig(config); if (EFI_ERROR(status)) return status;
   BOOLEAN checked = GuCheckConfig(config, segment, bus, device, function, &caps);
+  /* config[0x10/4] (the raw PCI config-space BAR0 register) used to be compared against GU_BAR0_BASE
+   * too - a second, independent copy of the same pin BarCheck's own ACPI-descriptor check already had
+   * (found 2026-11-10 while removing that one; a different format of the identical fact, exactly the
+   * kind of duplicate the code-review checklist's item 5 warns about). Dropped for the same reason:
+   * BarCheck already live-validates BAR0's shape without needing a prior capture. */
   BOOLEAN valid = checked && config[2] == GU_CONFIG_CLASS_REV && config[GU_MSIX_CAP_OFFSET / 4] == GU_MSIX_CAP_DWORD &&
-    config[0x10 / 4] == GU_BAR0_BASE && !(config[(caps.pcie + 8) / 4] & 0x00200000U);
+    !(config[(caps.pcie + 8) / 4] & 0x00200000U);
   BOOLEAN same = Save || !memcmp(config, InitialConfig, sizeof(config));
   if (Save || !valid || !same) ConfigLog(config);
   GuLog("target BDF=%zu:%zu:%zu.%zu checks=%u pm=%#x pcie=%#x msi=%#x msix=%#x\n",

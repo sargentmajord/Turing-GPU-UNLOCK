@@ -60,7 +60,10 @@
 
 /* ---- Values the checks pin that differ between cards and boards - read from
  * the card's own capture by the (not yet built) profile generator. ---- */
-#define GU_TARGET_BUS 0U /* placeholder - the PCI bus number the target card sits on */
+#define GU_TARGET_BUS 0U /* placeholder, informational only as of 2026-11-10 - checks.c's GuCheckConfig
+   no longer pins Bus to this value (bus numbering is per-motherboard, not a fact about the card; see
+   GuCheckConfig's own comment and port.c's matching 2026-11-04 change). Still generated/logged, not
+   gated on. */
 #define GU_CONFIG_CLASS_REV 0x00000000U     /* placeholder - PCI class/revision dword (config dword 2) */
 #define GU_PCIE_CAP_OFFSET 0x00U            /* placeholder - PCI Express capability offset */
 #define GU_PCIE_CAP_DWORD 0x00000000U       /* placeholder - its first dword */
@@ -79,9 +82,18 @@
  * PORTING-PLAN.md's "Known validation gap" before picking one. ---- */
 #define GU_BOARD_ID 0x00000000U       /* placeholder - must match a GuTargets[].Device */
 #define GU_BOARD_SUBSYSTEM 0x00000000U /* placeholder - must match a GuTargets[].Subsystem */
-#define GU_BAR0_BASE 0x00000000ULL     /* placeholder - from the real capture, not assumed */
+#define GU_BAR0_BASE 0x00000000ULL     /* placeholder, informational only as of 2026-11-10 - BarCheck/
+   ConfigCheck no longer pin BAR0's address to this value, only its shape (16 MiB, correct ACPI
+   descriptor/config-space encoding) - the real base address is live-detected via GetBarAttributes()
+   every run, the same way GuRead32/GuWrite32 already resolved it through EFI_PCI_IO_PROTOCOL's own
+   BarIndex parameter without ever needing to know it in advance. See BarCheck's own comment. */
 #define GU_BAR0_END 0x00000000ULL      /* placeholder - BAR0 is a 16 MiB aperture on both GA10x and TU10x, but its base address is assigned per-system */
-#define GU_CHIP_ID 0x00000000U         /* placeholder - the card's cold-state chip id read at register offset 0 */
+#define GU_CHIP_ID 0x00000000U         /* placeholder, informational only as of 2026-11-10 - ColdCheck no
+   longer requires an exact match: this project has real data for exactly one TU102 SKU (10de:1e07,
+   0x162000a1 on both of Cancretto's cards) and none for the other GuTargets-accepted id (10de:1e04,
+   documented as a different variant) - pinning either as "the" correct value would be a guess. Rejected
+   live instead: unmapped (0xffffffff), the 0xbadfxxxx "not ready" sentinel, or zero. See ColdCheck's
+   own comment. */
 #define GU_DEVICE_MEMORY_SIZE 0x0000U  /* placeholder - usable framebuffer size in MiB, decoded from
    NV_PFB_PRI_MMU_LOCAL_MEMORY_RANGE (register offset 0x100ce0, see app.c's TuringUsableFbMib() and its
    own comment) - NOT a direct register value and NOT register offset 0x1183a4, which this project used

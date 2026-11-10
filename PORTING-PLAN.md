@@ -855,3 +855,68 @@ consistent with real data for the first time, still pending an actual `-Experime
 it at runtime. Full test suite re-run clean (25/25) after the comment fix; both `build.ps1` modes rebuilt
 successfully against a real profile both before and after it (unaffected, as expected for a comment-only
 change).
+
+## BAR0/chip-id/memory-size/bus no longer require a prior per-machine capture (2026-11-10)
+
+Prompted by Cancretto asking whether an iGPU could substitute for his unavailable second card, and a
+direct instruction to stop requiring a fresh capture before anyone (him or a future tester) can run a
+build at all. Researched how `physicsdolphin/nv-uefi-unlocker` avoids this (read its actual Rust source,
+not just its docs): its `pci.rs` calls `EFI_PCI_IO_PROTOCOL.Mem.Read` with a `BarIndex` parameter - the
+firmware itself resolves BAR0's physical address internally, so it never needs to know or pre-capture it.
+
+Traced every consumer of this project's own profile-pinned constants and found the same thing was already
+true here, just not applied consistently: `GuRead32`/`GuWrite32`/`GuCopyFromIo` (`port.c`/`compat.c`)
+already call `Gu.pci->Mem.Read`/`Write` with `BarIndex=0` - they never dereference `Gu.bar_base` as a raw
+pointer, only use it for bounds-checking. `GU_BAR0_BASE`, `GU_CHIP_ID`, `GU_DEVICE_MEMORY_SIZE`, and
+`GU_TARGET_BUS` were used *only* as exact-match safety cross-checks against values already read live -
+confirmed by grep that `vendor/unlock.c` (the actual FWSEC/GSP/SEC2 transaction) never references any of
+them at all. Requiring a prior capture existed to populate these four cross-checks, not because the
+transaction itself needed them in advance.
+
+Fixed, each with its own reasoning (not a single blanket change):
+- **`BarCheck` (`app.c`)**: dropped the `AddrRangeMin != GU_BAR0_BASE`/`AddrRangeMax != GU_BAR0_END` exact-
+  match checks, replaced with self-consistency (`AddrRangeMax == AddrRangeMin + 0xffffff`) - everything
+  else in this check (`ResType`/`AddrLen`/`AddrSpaceGranularity`/checksum/end-tag) was already
+  profile-independent.
+- **`ConfigCheck` (`app.c`)**: found and fixed a *second*, independent copy of the same BAR0 pin -
+  `config[0x10/4] == GU_BAR0_BASE`, a raw-config-space-register check duplicating BarCheck's own
+  ACPI-descriptor check in a different format. Exactly the "parallel implementation" trap the code-review
+  checklist's item 5 warns about; would not have found it without tracing every consumer, not just the
+  ones already suspected.
+- **`ColdCheck` (`app.c`)**: `memory != GU_DEVICE_MEMORY_SIZE` replaced with `!memory` - `TuringUsableFbMib`
+  already returns 0 exactly when the register isn't ready (that readiness check *is* the real safety
+  property; comparing the decoded value to one specific prior capture's number added nothing). `chip !=
+  GU_CHIP_ID` replaced with a live sanity check (reject unmapped/`0xbadfxxxx`-sentinel/zero), not an exact
+  match - deliberately not hardcoded to a single "correct" TU102 chip id, because this project has real
+  data for exactly one SKU (`10de:1e07`, `0x162000a1` on both of Cancretto's cards) and none for the other
+  GuTargets-accepted id (`10de:1e04`, documented in README.md's own "Known validation gap" table as a
+  different variant) - pinning either value as "the" correct one would be a guess, not a verified fact.
+- **`checks.c`'s `GuCheckConfig`**: dropped `Bus != GU_TARGET_BUS` - another independent duplicate,
+  this time of a constraint `port.c`'s own `FindTarget` already stopped enforcing on 2026-11-04 (bus
+  numbering is per-motherboard, not a card fact) that this file, copied from Ampere, had kept the whole
+  time. `Segment`/`Device`/`Function` stay pinned to 0 - a genuine PCI topology invariant for a discrete
+  GPU's own primary function, true across every real capture seen so far, unlike bus number.
+
+Verified: full Python suite still 25/25 (unaffected, C-only change). Both `build.ps1` modes rebuilt via
+the elevated runner against a real profile (`run02`) - exit 0 both, confirming the refactor compiles
+clean in both preflight and `-ExperimentalUnlock` modes.
+
+**What this does and does not accomplish, stated plainly:** a tester can now get a usable *preflight*
+result without first sending a capture for us to build a matching profile from - `BarCheck`/`ColdCheck`'s
+BAR0/chip/memory gates no longer require it. It does **not** yet mean a fully capture-free experimental
+build: `checks.c`'s `ConfigCheck` (reachable only under `GU_EXPERIMENTAL_UNLOCK`, not by the preflight path
+any tester actually runs) still pins `GU_CONFIG_CLASS_REV`, `GU_MSIX_CAP_OFFSET`/`DWORD`, `GU_BOARD_ID`/
+`SUBSYSTEM` (a second, independent copy of what `port.c`'s `GuTargetConfig` already validates live at
+`FindTarget` time), and `GU_ROOT_PORT_DEVICE`/`FUNCTION` - none of those were in scope for this pass and
+none have been touched. `GU_PROM_SHA256` is a different kind of check entirely, not addressed here: it
+verifies the live-read VBIOS against a specific previously-seen-good fingerprint, not a redundant echo of
+a value already read live elsewhere - dropping it would be a deliberate safety-posture decision, not a
+mechanical refactor, and hasn't been made.
+
+**The one fact this change does not touch, regardless of what else gets fixed:** none of this makes
+`vendor/unlock.c`'s actual transaction logic (FWSEC/FRTS, GSP/SEC2 falcon staging, the real register
+writes) any more or less safe to run for the first time - that code has never executed against real
+silicon, by anyone, at any point in this project's history, only against a synthetic fixture this
+project's own prior entries already document as "not a real hardware oracle." Removing the per-machine
+capture requirement removes a validation *round-trip*; it does not supply the real-hardware validation
+that round-trip was, among other things, also standing in for.
